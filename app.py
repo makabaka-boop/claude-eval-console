@@ -127,7 +127,7 @@ SOLO_QA_PROJECT_REJECTION_MARKERS = (
     "题材不合格",
 )
 SUBMITTER_NAME = os.environ.get("CLAUDE_EVAL_SUBMITTER", "张鑫宇").strip() or "张鑫宇"
-APP_VERSION = "20260912.2"
+APP_VERSION = "20260913.1"
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$")
 BACKGROUND_ID_RE = re.compile(r"backgrounded\s+[·•]\s+([A-Za-z0-9_-]+)", re.I)
@@ -297,12 +297,8 @@ EVALUATION_DISALLOWED_PHRASES = (
     "阶段顺序清楚",
     "阶段顺序清晰",
     "正确抓住",
-    "准确识别",
     "进一步处理",
     "最终产物可用",
-    "工具路径",
-    "调用路径",
-    "工具轨迹",
     "无法支撑",
     "返工点未被发现",
     "执行阶段暴露",
@@ -311,7 +307,6 @@ EVALUATION_DISALLOWED_PHRASES = (
     "本次复核中",
     "未据此扣分",
     "属于环境故障",
-    "docker compose config --quiet",
     "逐项响应",
     "核心流程",
     "未影响定档",
@@ -329,15 +324,10 @@ EVALUATION_COMMAND_REFERENCE_RE = re.compile(
     re.I,
 )
 EVALUATION_HIGH_RISK_FRAGMENTS = (
-    "npx playwright test",
-    "npx vitest run",
-    "npm test",
-    "npm run build",
-    "docker compose build",
-    "docker compose config",
-    "break-system-packages",
     "全部通过",
     "生产构建成功",
+    "覆盖指定链路",
+    "原有功能保持可用",
     "没有先给出明确阶段计划或持续状态记录",
     "为每条复现路径补充回归测试",
     "修复仅限上述问题",
@@ -498,10 +488,11 @@ EVALUATION_TERMINAL_FAILURE_RE = re.compile(
     r"(?:最终|最后|截至交付|交付时|结束时).{0,30}"
     r"(?:仍|依然|还有|保留|留下)?.{0,12}(?:失败|未通过|未完成|未验证)"
     r"|(?:仍有|仍是|依然有).{0,20}(?:失败|未通过)"
-    r"|(?:没有|还没|未)(?:再|再次|重新|继续)?(?:运行|执行|完成)?(?:验证|复验|检查|通过)"
-    r"|(?:缺少|没有|未留下).{0,24}(?:修正后|调整后|最终)?.{0,10}"
+    r"|(?:没有|还没|未)(?:再|再次|重新)(?:运行|执行|完成)?(?:验证|复验|检查|通过)"
+    r"|(?:缺少|没有|未留下).{0,24}(?:修正后|调整后|最终|最后一次).{0,10}"
     r"(?:验证|复验|检查)(?:结果|记录|证明)"
-    r"|(?:没有|未留下).{0,24}(?:通过|成功).{0,10}(?:结果|记录|证明)",
+    r"|(?:没有|未留下).{0,24}(?:最终|最后一次|修正后|调整后).{0,10}"
+    r"(?:通过|成功).{0,10}(?:结果|记录|证明)",
     re.I,
 )
 EVALUATION_RECOVERY_RE = re.compile(
@@ -520,11 +511,21 @@ PROMPT_HIGH_RISK_FRAGMENTS = (
 )
 BUG_REPAIR_REPEAT_SIMILARITY_LIMIT = 0.72
 BUG_REPAIR_RESIDUAL_MARKERS = ("上轮", "上次修复后", "修复后")
-EVALUATION_DESCRIPTION_GUIDANCE = f"""评分描述写成自然的项目工作记录，不写成评语或验收报告模板，不限制句数。每段按“做了什么—途中遇到什么—最后结果怎样”的顺序组织，从本项目特有的业务对象、测试数量、可观察结果或返工动作切入；没有发生波折时可以省略中间一项，不要为了凑结构编造过程。直接说本轮改了什么、哪里返工、还有什么没验证；一句只承载一组相关事实，功能很多时挑最能说明分数的两三项。不足可以逐项举例，但每项都要落到本轮真实发生的动作和后果。凡是低于 5 分的描述，必须用至少两个完整句子自然写明问题发生在第几轮；整段合计应包含具体步骤、文件、函数、接口、日志、报错或数量等至少一项客观证据，并说明具体不足及其实际影响，不强制这些内容挤在第一句。如果轨迹中找不到真实不足，应改评 5 分，不能为了保留非满分而编造问题。5 分描述必须写出实际核对或验收依据，并且只能保留正向完成事实；只要描述中保留了本轮真实发生的错误操作、遗漏、失误或返工，该维度就不能评 5 分。预期的 404、409、422 等业务反馈属于契约结果，不要误写成执行失误。五个维度不要使用相同的开头、转折和收尾，也不要把一个维度的扣分点搬到另一个维度：交付写最终得到什么，指令遵循对照明确要求，规划记录真实步骤和遗漏，推理写定位依据与判断失误，执行写“对象＋结果＋本轮独有数字或故障恢复”。措辞尽量口语化：根据语境把“未”写成“没有”或“还没”，把“均”写成“都”，把“包含”写成“有”；不要改动代码、文件名、接口字段、原始报错或引号内的原文。用通俗方式解释测试数据，不直接抄写 `[0,2,1,1]` 这类原始数字数组；应改写成“零费用项保持为零、其余费用按提交顺序分配”等可观察业务结果，原数组只保留在内部证据中。五维描述直接陈述本轮动作和结果，不使用“用户”这类泛化主语，不出现 AI、AI 浏览器、AI Agent、AI 模型、Codex、GPT、Claude Code 等身份、工具或模型名称，也不用“模型认为”“模型完成了”这类说法指代执行者。执行能力描述完全不出现 npm、npx、Docker 等原始命令名称，不罗列命令串；即使命令真实执行过，也改写成项目对象、失败现象、恢复动作和可核验结果。五维描述只能使用当前轮次轨迹、Git 变化和验收结果中真实存在的事实；数字、成功或失败、修改前后状态必须与证据一致。“重复读取”“多次调用”等次数判断必须写出轨迹中可核对的次数；状态被清空、内容被覆盖和架构不匹配等因果判断必须有直接输出，不能只凭后续测试结果反推。不要推测执行者心里“意识到”或“抓住”了什么，也不要为了扣分编造错误。禁用这些措辞：{'、'.join(EVALUATION_DISALLOWED_PHRASES)}。高风险公共片段同样禁用：{'、'.join(EVALUATION_HIGH_RISK_FRAGMENTS)}。不复述分数，不提评分工具、内部提示或生成过程。只评价当前轮次完成的内容。"""
-EVALUATION_DESCRIPTION_GUIDANCE += """ 环境、网络、权限、系统解释器、包管理器或系统运行库问题只能写入 other_issues，不能出现在任何非满分维度中作为扣分理由。遇到这类阻碍后完成适配属于恢复事实，不是能力缺点；如果轨迹没有另外记录错误命令、错误修改、冗余调用或遗漏步骤，该维度应评 5 分。确有错误操作时只描述错误动作和它造成的后果，不把环境故障本身写成不足。"""
+EVALUATION_DESCRIPTION_GUIDANCE = f"""评分描述写成自然的项目工作记录，不写成评语或验收报告模板，不限制句数。每段按“做了什么—途中遇到什么—最后结果怎样”的顺序组织，从本项目特有的业务对象、测试数量、可观察结果或返工动作切入；没有发生波折时可以省略中间一项，不要为了凑结构编造过程。直接说本轮改了什么、哪里返工、还有什么没验证；一句只承载一组相关事实，功能很多时挑最能说明分数的两三项。不足可以逐项举例，但每项都要落到本轮真实发生的动作和后果。凡是低于 5 分的描述，必须用至少两个完整句子自然写明问题发生在第几轮；整段合计应包含具体步骤或工具调用，以及对应文件、函数、接口、命令、日志或报错中的真实依据，并说明具体不足及其实际影响，不强制这些内容挤在第一句。轨迹中找不到真实不足时不能为了保留非满分而编造问题，但也不能仅凭“最终检查通过”自动评 5 分，仍须逐项满足评分表的满分条件。5 分描述必须写出实际核对或验收依据，并且只能保留正向完成事实；只要描述中保留了本轮真实发生的错误操作、遗漏、失误或返工，该维度就不能评 5 分。预期的 404、409、422 等业务反馈属于契约结果，不要误写成执行失误。五个维度不要使用相同的开头、转折和收尾，也不要把一个维度的扣分点搬到另一个维度：交付完整性优先写本项目已经产生的业务结果；指令遵循优先写题面约束与具体文件、接口或可观察行为之间的对应关系；规划记录真实步骤、状态更新和由规划缺口造成的遗漏或返工，不能只写没有正式清单；推理写定位依据与错误判断，不能用编辑笔误冒充推理问题；执行写具体工具动作、对象、结果与实际后果。测试结果写成“39 项检查通过”或“39 项检查成功”，不要写“全部通过”。禁止使用“X 项成功，覆盖指定链路”“原有功能保持可用”这类固定收尾，应以当前项目的业务对象和实际结果结束。措辞尽量口语化：根据语境把“未”写成“没有”或“还没”，把“均”写成“都”，把“包含”写成“有”；不要改动代码、文件名、接口字段、原始报错或引号内的原文。用通俗方式解释测试数据，不直接抄写 `[0,2,1,1]` 这类原始数字数组；应改写成“零费用项保持为零、其余费用按提交顺序分配”等可观察业务结果，原数组只保留在内部证据中。五维描述直接陈述本轮动作和结果，不使用“用户”这类泛化主语，不出现 AI、AI 浏览器、AI Agent、AI 模型、Codex、GPT、Claude Code 等身份、工具或模型名称，也不用“模型认为”“模型完成了”这类说法指代执行者。执行能力描述不要罗列通用验收命令串或用命令作为固定收尾；如果扣分依据正是错误命令、重复命令或失败工具调用，应写出轨迹中实际存在的命令、文件和结果，提交前会核对引用是否真实。五维描述只能使用当前轮次轨迹、Git 变化和验收结果中真实存在的事实；数字、成功或失败、修改前后状态必须与证据一致。“重复读取”“多次调用”等次数判断必须写出轨迹中可核对的次数；状态被清空、内容被覆盖和架构不匹配等因果判断必须有直接输出，不能只凭后续测试结果反推。不要推测执行者心里“意识到”或“抓住”了什么，也不要为了扣分编造错误。禁用这些措辞：{'、'.join(EVALUATION_DISALLOWED_PHRASES)}。高风险公共片段同样禁用：{'、'.join(EVALUATION_HIGH_RISK_FRAGMENTS)}。不复述分数，不提评分工具、内部提示或生成过程。只评价当前轮次完成的内容。"""
+EVALUATION_DESCRIPTION_GUIDANCE += """ 环境、网络、权限、系统解释器、包管理器或系统运行库问题只能写入 other_issues，不能出现在任何非满分维度中作为扣分理由。遇到这类阻碍后完成适配属于恢复事实，不是能力缺点；删除环境扣分后必须重新按评分表定档，不能因为没有找到另一条扣分依据就自动升为 5 分。确有错误操作时只描述错误动作和它造成的后果，不把环境故障本身写成不足。"""
 EVALUATION_RUBRIC_START = "第三步：打分并撰写反馈"
 EVALUATION_RUBRIC_END = "第四步：提交数据"
-EVALUATION_SCORE_GUIDANCE = """严格使用下方评分表的 1～5 分制，对五个维度分别定档，不得改用十分制、百分制或自行换算。先根据本轮轨迹与产物逐项确定最匹配档位，再填写该档整数；评分描述必须与分数一致。不要为了省事把五项机械地都评为 5 分：只有五个维度分别都有充分材料证明没有缺口时才可全部满分；轨迹中真实出现的遗漏、错误修改、无效重试、未完成验收或需求偏差，应体现在对应维度的分数中。但不能为了让分数有高低而编造不足。5 分描述必须给出真实核对或验收依据，并且不能同时写“早期错误后来修复”一类扣分事实；如果该事实确实属于当前维度，应降低分数，如果不属于当前维度则不要混写。低于 5 分时必须写明本轮真实存在的不足、具体证据和实际影响；如果只能写出完成情况和优点，该项应评 5 分。环境、网络或复核工具自身故障不能作为能力扣分依据；如果同一失败在暂存本轮改动后的未修改基线中也能复现，它属于历史基线，不能作为本轮扣分或执行缺口。只写“若干文件”或文件数量不算具体证据，必须给出完整文件名或关键报错原文。禁止照抄评分表，必须写本轮可核验实证。"""
+EVALUATION_SCORE_GUIDANCE = """严格使用下方评分表的 1～5 分制，对五个维度分别独立定档，不得改用十分制、百分制或自行换算。先从本轮轨迹提取正向证据和负向证据，再判断最匹配档位，不能从 5 分开始倒扣，也不能为了拉开分差编造不足。最终检查通过、没有剩余 Bug 或 next_action=complete 只能证明最终状态，不能单独证明任何维度达到 5 分；反过来，没有发现扣分点也不能直接判满分，仍要有材料正向证明该维度的满分条件。
+
+五个维度必须分别按以下对象定档：
+1. 交付完整性只评价任务成败和最终产物。5 分要求明示需求、隐性边界和验收链路齐全，并且本轮一次性完美跑通；最终成果正确，但本轮由错误实现、错误测试、错误脚本或错误文档造成失败和返工时通常为 4 分。仍有明确业务 Bug、遗漏需求或无法运行时，根据影响评 3 分或更低。修复前基线失败、故意撤回修复证明测试有效以及纯环境故障不算交付扣分。
+2. 指令遵循只评价 Prompt 约束是否落实。先提取所有显式和隐式约束，再逐条对应到文件、接口或可观察行为；5 分要求细微约束也有实证且没有擅自扩展。普通实现、测试或工具失误没有违反 Prompt 时不能扣这一项；只有遗漏、误解或违背具体约束时才按影响降分。
+3. 任务规划只评价任务拆解、先后顺序、阶段反馈、状态追踪和歧义处理。文档明确不限定计划工具形式，因此没有正式任务清单或没有调用计划工具本身不能作为扣分点；连续文字更新同样可以构成有效追踪。5 分要求拆解清楚且状态持续同步，4 分只允许少量且有实证的更新滞后，3 分应有约一半阶段缺少追踪或子步骤明显不细，2 分应有盲目开工、状态与实际不符或对关键歧义靠猜等证据。
+4. 推理能力只评价需求理解、根因定位、逻辑推导和思考效率。5 分要求根因判断直接、严密且没有绕行，4 分允许次要边界遗漏或一两次轻微自我修正，3 分需要有多次错误假设、遗漏重要条件或明显绕行，2 分需要有猜测式排查、逻辑混乱或严重过度思考的证据。纯编辑笔误、命令参数写错或文本替换失败属于执行能力，除非轨迹明确显示其根源是错误判断，不能同时拿来扣推理。
+5. 执行能力只评价工具调用路径是否少而准。5 分要求调用精准、没有无效探索或重复读取；4 分允许一两次不影响结果的轻微冗余或失败调用；3 分要求存在可核对的重复读取、反复检索、错误命令或文件间往返，并造成额外修改或复验；2 分要求大量冗余或失败调用；1 分要求工具滥用或缺失关键读取并导致产物不可用。环境、网络、权限、系统解释器、包管理器、浏览器和系统运行库故障都不能扣分，只能评价执行者在获知故障后的自身调用是否仍然重复或失当。
+
+评分描述必须与分数一致。5 分描述要列出实际核对或验收依据，不能含有属于该维度的错误、遗漏、失误或返工；低于 5 分必须写明真实不足、发生位置、客观证据和实际后果。如果材料不支持原扣分点，应删除并按评分表重新定档；只有正向材料足以证明满分门槛时才可升为 5 分。后续成功结果决定最终产物是否通过，但本轮自身错误造成的早期失败和返工仍是相关维度区分 5 分与 4 分的证据。只写“若干文件”或文件数量不算具体证据，必须给出完整文件名、函数、接口、步骤、工具调用对象或关键报错原文。禁止照抄评分表，必须写本轮可核验实证。"""
+EVALUATION_FINAL_RESULT_GUIDANCE = """同类检查以后出现的结果决定最终是否通过；已经被后续成功覆盖的失败不能再写成最终仍失败、没有复验或缺少成功记录。但如果早期失败由本轮自身的错误实现、错误断言、错误脚本、错误文档或错误工具调用造成，它仍是交付、推理或执行维度区分 5 分与 4 分的过程证据，只能说明后来已经恢复，不能从评分依据中抹掉。修复前基线失败、故意验证旧实现的失败和环境故障不属于这类扣分证据。"""
 TASK_DIFFICULTY_GUIDANCE = """task_difficulty 必须在检查真实代码、验收结果和本轮轨迹后独立判定，不采用题面、自报或历史记录中的难度标签。简单表示改动集中、路径直接且验证成本低；中等表示跨模块完成一条工程链路并处理常见失败路径；困难表示存在较多状态不变量、恢复逻辑或复杂跨层协作；地狱只用于产物确实同时包含多组深层机制且实现与验证负担显著的情况。"""
 DEVELOPER_PROMPT_STYLE_GUIDANCE = """题面使用自然、简洁的开发交接口吻，像项目负责人结合当前场景向开发者说明下一步工作。按业务因果和操作流程组织内容，不把数据库、接口、页面、异常、测试等字段机械地逐项拼接，不连续堆叠“必须”“不得”“须”“需要”等命令句，不使用“新增某模块，使用户能够”“提供某接口并覆盖”等模板反复起句，也不在结尾集中罗列通用工程或测试清单。技术约束、失败现象、兼容边界和验收证据仍要具体，但应放在它们对应的业务行为附近。"""
 BUG_REPAIR_PROMPT_STYLE_GUIDANCE = """先根据本轮需求检查功能是否真的实现，再记录已经稳定复现的 Bug。每个 Bug 另写一条 customer_summary，系统只按原顺序用中文分号把摘要拼成一整行，不添加通用开场、序号、命令或验收尾巴。每条摘要用客户能看懂的口语写清项目专属业务对象、触发条件、当前可观察结果和正确状态；不要写标题、项目符号、引号、Markdown、文件名、函数名、命令、测试框架、推测的根因、解决方法或通用测试要求。每条摘要控制在 12～90 个字符并尽量用一句话说清楚；编号、引号、连续标点和多余句末符号会在发送前由本地程序整理，不作为候选失败原因。若上一轮修复后同一问题仍存在，摘要必须依据新的复现证据描述修复后的残留状态，不能重发或同义改写当前题面；完全没有新的可观察差异时应停止自动续轮并交由人工确认。内部的 reproduction、actual、expected 和 evidence 仍须完整填写，不能为了凑修复轮把风险或测试缺口写成 Bug。"""
@@ -6430,6 +6431,11 @@ def remove_generic_user_word(value: Any) -> str:
     )
 
 
+def normalize_evaluation_public_wording(value: Any) -> str:
+    """Remove a safely rewritable public phrase without changing its evidence."""
+    return re.sub(r"全部\s*通过", "通过", remove_generic_user_word(value))
+
+
 def automatic_turn_evaluation(row: Dict[str, Any]) -> Dict[str, Any]:
     try:
         review = json.loads(row.get("turn_review_result") or "{}")
@@ -6460,7 +6466,9 @@ def turn_evaluation(row: Dict[str, Any]) -> Dict[str, Any]:
     for key in EVALUATION_DIMENSION_KEYS:
         item = effective.get(key)
         if isinstance(item, dict) and "description" in item:
-            item["description"] = remove_generic_user_word(item["description"])
+            item["description"] = normalize_evaluation_public_wording(
+                item["description"]
+            )
     return effective
 
 
@@ -6503,7 +6511,7 @@ def normalize_manual_evaluation(
             raise WorkflowError(f"{labels[key]}分数必须是 1～5") from exc
         if score not in range(1, 6):
             raise WorkflowError(f"{labels[key]}分数必须是 1～5")
-        description = remove_generic_user_word(
+        description = normalize_evaluation_public_wording(
             re.sub(r"\s+", " ", str(item.get("description") or "")).strip()
         )
         if not description:
@@ -7017,6 +7025,7 @@ def completed_turns() -> List[Dict[str, Any]]:
         records.append({
             "key": f"{row['run_id']}:{turn_number}",
             "run_id": row["run_id"],
+            "session_id": row.get("session_id") or "",
             "project_number": run_project_number_label(row),
             "repo_name": row["repo_name"],
             "turn_number": turn_number,
@@ -9406,10 +9415,10 @@ def validate_nonfull_evaluation_description(
         for sentence in sentences
         if any(marker in sentence for marker in EVALUATION_PROBLEM_MARKERS)
     ]
+    description_has_position = bool(
+        EVALUATION_POSITION_EVIDENCE_RE.search(description)
+    )
     if key == "planning":
-        description_has_position = bool(
-            EVALUATION_POSITION_EVIDENCE_RE.search(description)
-        )
         located_problem = any(
             (
                 EVALUATION_POSITION_EVIDENCE_RE.search(sentence)
@@ -9417,21 +9426,23 @@ def validate_nonfull_evaluation_description(
                     description_has_position
                     and any(
                         reference in sentence
-                        for reference in ("该文件", "上述文件", "这些文件", "该函数", "该接口")
+                        for reference in (
+                            "该文件", "上述文件", "这些文件", "该函数", "该接口",
+                        )
                     )
                 )
             )
             and any(
-                marker in sentence
-                for marker in EVALUATION_PLANNING_PROBLEM_MARKERS
+                marker in sentence for marker in EVALUATION_PLANNING_PROBLEM_MARKERS
             )
             for sentence in problem_sentences
         )
     else:
-        located_problem = any(
-            EVALUATION_POSITION_EVIDENCE_RE.search(sentence)
-            for sentence in problem_sentences
-        )
+        # The public guidance explicitly allows the location, deficiency and
+        # consequence to be spread across two natural sentences. Requiring the
+        # filename and the negative marker in the same sentence caused valid,
+        # well-grounded descriptions to be regenerated repeatedly.
+        located_problem = description_has_position and bool(problem_sentences)
     if not located_problem:
         raise WorkflowError(
             f"自动检查的{label}非满分描述没有把不足定位到具体步骤、文件、函数、接口或报错"
@@ -9467,7 +9478,19 @@ def evaluation_description_sentences(value: Any) -> List[str]:
 def evaluation_full_score_deficiency(description: str) -> str:
     """Return a concrete self-attributed deficiency that contradicts 5 points."""
     for sentence in evaluation_description_sentences(description):
-        if any(pattern.search(sentence) for pattern in EVALUATION_FULL_SCORE_DEFICIENCY_PATTERNS):
+        # “没有发生错误修改或返工” is a positive absence statement, not a
+        # confession of a repaired mistake. Remove only that bounded clause;
+        # a later “但……” clause still remains available to the checks below.
+        inspected = re.sub(
+            r"(?:未|没有|不曾)(?:发生|出现|产生|存在|留下)"
+            r"[^；。！？]{0,100}(?=；|，?但|$)",
+            "",
+            sentence,
+        )
+        if any(
+            pattern.search(inspected)
+            for pattern in EVALUATION_FULL_SCORE_DEFICIENCY_PATTERNS
+        ):
             return sentence
     return ""
 
@@ -9605,7 +9628,7 @@ def normalize_evaluation(
         if score < 1 or score > 5:
             raise WorkflowError(f"自动检查的 {key} 分数超出范围")
         item["score"] = score
-        item["description"] = remove_generic_user_word(
+        item["description"] = normalize_evaluation_public_wording(
             re.sub(r"\s+", " ", str(item["description"])).strip()
         )
         folded_description = item["description"].casefold()
@@ -9647,13 +9670,6 @@ def normalize_evaluation(
                 f"自动检查的 {key} 描述不能出现 AI 身份、工具或模型名称："
                 f"{identity_reference}"
             )
-        if key == "execution":
-            command_reference = evaluation_command_references(item["description"])
-            if command_reference:
-                raise WorkflowError(
-                    "自动检查的执行能力描述不能出现通用命令名称："
-                    f"{command_reference[0]}"
-                )
         validate_evaluation_score_description_consistency(
             key,
             score,
@@ -9745,10 +9761,21 @@ def compact_evaluation_evidence(value: Any) -> str:
 def evaluation_position_anchors(sentence: str) -> List[str]:
     anchors: List[str] = []
     anchors.extend(match.group(0) for match in EVALUATION_FILE_NAME_RE.finditer(sentence))
-    anchors.extend(
-        next((group for group in match.groups() if group), "")
-        for match in EVALUATION_QUOTED_EVIDENCE_RE.finditer(sentence)
-    )
+    for match in EVALUATION_QUOTED_EVIDENCE_RE.finditer(sentence):
+        quoted = next((group for group in match.groups() if group), "").strip()
+        if quoted in {
+            "交付完整性", "指令遵循", "任务规划", "推理能力", "执行能力",
+        } or "……" in quoted or "..." in quoted:
+            continue
+        if re.fullmatch(r"[\u4e00-\u9fff，、：；！？\s]+", quoted) and not any(
+            marker in quoted
+            for marker in ("错误", "失败", "找不到", "不存在", "无法", "冲突")
+        ):
+            # A quoted Chinese narrative such as “检查环境，然后实现扩展”
+            # is prose, not an evidence identifier that must appear verbatim in
+            # the compact trace.
+            continue
+        anchors.append(quoted)
     anchors.extend(
         match.group(0) for match in EVALUATION_FUNCTION_REFERENCE_RE.finditer(sentence)
     )
@@ -10182,6 +10209,11 @@ def validate_evaluation_final_verification_consistency(
             continue
         unrecovered_claim = False
         for terminal_match in terminal_matches:
+            terminal_text = description[
+                terminal_match.start():terminal_match.end()
+            ]
+            if re.search(r"(?:0|零)\s*项?\s*失败", terminal_text):
+                continue
             recovery = EVALUATION_RECOVERY_RE.search(
                 description, terminal_match.end()
             )
@@ -10504,11 +10536,13 @@ def run_codex_evaluation_dimension_repair(
     if len(verification_text) > 24000:
         verification_text = verification_text[-24000:]
     final_verification_summary = trajectory_final_verification_summary(trajectory)
-    prompt = f"""只修正第 {turn_number} 轮“{dimension_label}”这一项，不改其他四个维度，也不重新判断代码是否通过。现有分数是 {int(item.get('score') or 0)} 分，通常保持不变，但分数和描述必须一致：5 分只能写有真实核对或验收依据的正向事实，不能同时保留错误、遗漏、失误或返工；材料确实证明当前维度发生过这些问题时应降低分数，不属于当前维度时不要混写。低于 5 分时，请依据原题面、已有描述、验收结果和本轮操作轨迹，把真实存在的不足、客观证据及实际影响写成容易看懂的至少两个完整句子；这些内容可以分布在整段中，不必全部塞进第一句。必须写明第 {turn_number} 轮，并把不足定位到材料中真实存在的具体步骤、文件、函数、接口、日志或报错。不能添加材料中不存在的失败、修改动作、测试结果或因果关系；“重复”“多次”要写出可核对次数，状态清空、内容覆盖或架构不匹配必须引用直接输出。若材料没有支持额外细节，应把该项改评 5 分，不能推测或编造。直接写发生的动作和结果，不要出现“用户”这类泛化主语，也不要出现 AI、AI 浏览器、AI Agent、AI 模型、Codex、GPT、Claude Code 等身份、工具或模型名称，或用“模型认为”“模型完成了”一类主语。不要写命令名称、评分工具或内部校验过程，也不要抄写原始数字数组；把数组表达的含义改成容易理解的业务结果。
+    prompt = f"""只修正第 {turn_number} 轮“{dimension_label}”这一项，不改其他四个维度，也不重新判断代码是否通过。现有分数是 {int(item.get('score') or 0)} 分，但不得把它当成默认答案；先重新对照第三步中“{dimension_label}”的 1～5 分条件，再决定保持还是调整。5 分不是删除负面句子后的兜底值，必须由材料正向证明满分条件；材料证明当前维度发生过错误、遗漏、失误或返工时应降低分数，不属于当前维度时不要混写。
+
+本次必须按维度归因：交付完整性看最终产物和是否一次性完美跑通；指令遵循看 Prompt 的显式、隐式约束是否逐条落实；任务规划看拆解、顺序、阶段反馈与状态追踪，不得仅因没有正式任务清单扣分；推理能力看需求理解、根因判断和逻辑效率，不能用单纯编辑笔误代替推理错误；执行能力看具体工具调用路径，只能用错误修改、错误命令、重复读取或冗余调用等自身动作评价。低于 5 分时，请依据原题面、已有描述、验收结果和本轮操作轨迹，把真实存在的不足、客观证据及实际影响写成容易看懂的至少两个完整句子；这些内容可以分布在整段中，不必全部塞进第一句。必须写明第 {turn_number} 轮，并把不足定位到材料中真实存在的具体步骤、工具调用、文件、函数、接口、命令、日志或报错。不能添加材料中不存在的失败、修改动作、测试结果或因果关系；“重复”“多次”要写出可核对次数，状态清空、内容覆盖或架构不匹配必须引用直接输出。若材料不支持现有扣分点，应删除该扣分点并重新按评分表定档；只有正向材料足以证明满分门槛时才改评 5 分，不能因为描述里暂时只剩完成事实就自动升分。直接写发生的动作和结果，不要出现“用户”这类泛化主语，也不要出现 AI、AI 浏览器、AI Agent、AI 模型、Codex、GPT、Claude Code 等身份、工具或模型名称，或用“模型认为”“模型完成了”一类主语。不要罗列通用验收命令串；执行维度确实由错误或重复命令扣分时，应写出轨迹中的真实命令。不要提评分工具或内部校验过程，也不要抄写原始数字数组；把数组表达的含义改成容易理解的业务结果。
 
 环境、网络、权限、系统解释器、包管理器和系统运行库问题不能作为任何维度的扣分依据，也不要在非满分描述里重复这些环境现象。确有执行不足时，只写材料中真实存在的错误命令、错误修改、冗余调用或遗漏步骤及其后果；找不到这类证据时，不得用环境问题替代。
 
-同类检查后出现的结果覆盖早期结果。如果下方最后结果已经通过，只能把早期失败写成已经恢复的过程，不能再写成最终仍失败、未复验或缺少通过记录。
+{EVALUATION_FINAL_RESULT_GUIDANCE}
 
 本次未通过原因：{validation_error}
 
@@ -10716,7 +10750,7 @@ def run_codex_regrade(
 
 本轮最后一次检查结果：
 {final_verification_summary}
-同类检查以后出现的结果为准；已经被后续成功覆盖的失败，只能描述为已恢复的过程，不能据此声称最终仍失败或没有复验。
+{EVALUATION_FINAL_RESULT_GUIDANCE}
 
 本轮操作轨迹：
 {trajectory or '未取得轨迹内容'}
@@ -10781,7 +10815,7 @@ def run_codex_review(
 
 第一轮最后一次检查结果：
 {final_verification_summary}
-同类检查以后出现的结果为准；已经被后续成功覆盖的失败，只能描述为已恢复的过程，不能据此声称最终仍失败或没有复验。
+{EVALUATION_FINAL_RESULT_GUIDANCE}
 
 第一轮操作轨迹：
 {trajectory or '未取得轨迹内容'}
@@ -10869,7 +10903,7 @@ def run_codex_final_review(
 
 当前轮次最后一次检查结果：
 {final_verification_summary}
-同类检查以后出现的结果为准；已经被后续成功覆盖的失败，只能描述为已恢复的过程，不能据此声称最终仍失败或没有复验。
+{EVALUATION_FINAL_RESULT_GUIDANCE}
 
 当前轮次操作轨迹：
 {trajectory or '未取得轨迹内容'}

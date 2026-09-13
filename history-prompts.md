@@ -827,3 +827,153 @@
 <!-- prompt-end -->
 <!-- task-entry-end -->
 
+<!-- task-entry-start {"run_id": "005ee8ad6f86", "repo_name": "spoken-clip-calibrator", "task_type": "0-1 代码生成", "project_category": "纯前端", "language_framework": "TypeScript, React, Vite, HTMLMediaElement, Vitest, Playwright, Docker, Docker Compose", "summary": "口述史整理员边听本地录音边按键记录可引用片段时，拖动进度条和显示精度差异常使试听范围与导出的时间码不一致。 … 不可解码文件、空标签、相等或反向边界须就地报错且不改变清单，禁止固定时间码、假播放状态或未实现按钮；验收者最终能看到试听游标回到精确起点，并从下载内容复算每个片段。"} -->
+## 0048 · spoken-clip-calibrator
+
+- 创建时间：2026-09-12 21:12:21 +0800
+- 项目类别：纯前端
+- 任务难度：待评估
+- 语言/框架：TypeScript, React, Vite, HTMLMediaElement, Vitest, Playwright, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+口述史整理员边听本地录音边按键记录可引用片段时，拖动进度条和显示精度差异常使试听范围与导出的时间码不一致。请从空仓库实现纯前端片段切取校准器，使用 TypeScript、React、Vite 与 HTMLMediaElement，只读取用户选择的本地音频，不上传文件或访问在线服务。播放中可分别捕获起点、终点并填写非空标签，时间取媒体 currentTime 乘以 1000 后按四舍五入得到整数毫秒；仅当 0≤起点＜终点≤音频时长的同样毫秒值时才能加入。片段清单允许选择、删除和循环试听；试听必须从记录起点开始，在首次观测到当前时间达到或越过终点时暂停并回到起点，不得擅自吸附到整秒。导出 JSON 按起点、终点、创建序号依次升序排列，包含音频文件名、时长毫秒、标签和边界。Docker Compose 启动页面，宿主端口可由 WEB_PORT 覆盖，并提供名为 verify 的一次性验收服务；Vitest 校验取整与边界，Playwright 使用仓库内短音频走通打点、试听和导出。不可解码文件、空标签、相等或反向边界须就地报错且不改变清单，禁止固定时间码、假播放状态或未实现按钮；验收者最终能看到试听游标回到精确起点，并从下载内容复算每个片段。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "eb5fba9d366a", "repo_name": "wheel-rim-defect-segmenter", "task_type": "0-1 代码生成", "project_category": "全栈", "language_framework": "Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker", "summary": "轮对超声复核时，检测仪导出的环形读数常把跨越零度的同一处损伤拆成两段，检修员因而可能重复计数。 … 跨零度样例最终只显示一个连续区段，其跨度与峰值角可由原始读数逐项复算。"} -->
+## 0049 · wheel-rim-defect-segmenter
+
+- 创建时间：2026-09-12 21:14:04 +0800
+- 项目类别：全栈
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker
+
+### User Prompt
+
+<!-- prompt-start -->
+轮对超声复核时，检测仪导出的环形读数常把跨越零度的同一处损伤拆成两段，检修员因而可能重复计数。请从空仓库实现一套真实联调的判读台：React 页面提交 JSON，FastAPI 接收恰好 360 条采样；每条角度必须是互不重复的整数 0 至 359，幅值为非负毫米数，并由用户给出非负阈值。使用 Python 3.12、TypeScript 与 Vite，在核心单元测试中固定环形边界；Docker Compose 的宿主端口由 WEB_PORT、API_PORT 覆盖，仓库提供名为 verify 的一次性验收服务。幅值大于或等于阈值即为缺陷点，相邻整数角度属于同段，359 与 0 也相邻；全圆超限时唯一结果为起点 0、终点 359、跨度 360。其他区段以顺时针遇到的首个缺陷角为起点，跨度按包含的采样点数计算，峰值取段内最大幅值，峰值并列取最小角度。页面须画出可辨认的 360 度采样环，点击结果区段能突出对应角点；缺失、重复、越界或非法幅值应定位字段并清空本次结果，禁止用固定判读替代计算。跨零度样例最终只显示一个连续区段，其跨度与峰值角可由原始读数逐项复算。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "eadb4b06654d", "repo_name": "weighbridge-telegram-normalizer", "task_type": "0-1 代码生成", "project_category": "纯后端", "language_framework": "Go 1.25, Gin, testify, Docker, Docker Compose", "summary": "散货码头从旧地磅导出的电文常被不同系统按字符而非字节切割，计量复核员需要确认规范化记录确实来自同一份原始数据。 … 使用 Go 1.25、Gin 与 testify，并以 Docker Compose 启动 API；宿主端口可由 API_PORT 覆盖，仓库提供名为 verify 的一次性验收服务及覆盖合法解析、边"} -->
+## 0050 · weighbridge-telegram-normalizer
+
+- 创建时间：2026-09-13 05:56:14 +0800
+- 项目类别：纯后端
+- 任务难度：待评估
+- 语言/框架：Go 1.25, Gin, testify, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+散货码头从旧地磅导出的电文常被不同系统按字符而非字节切割，计量复核员需要确认规范化记录确实来自同一份原始数据。请从空仓库实现纯后端 HTTP API，接收不超过 10000 行的 ASCII 文件；每行正文必须恰为 37 字节，格式为 YYYYMMDDhhmmss|SSSSSSSS|sdddddddd|UUU，行尾统一为 LF，末行也必须有 LF。时间须为真实有效的公历日期时间，设备码只能含大写字母或数字，s 为正负号，八位数字表示整数克，UUU 仅允许 KGM。合法响应保持输入顺序，返回时间、设备码、原值、整数克值及原文件 SHA-256。解析遇到首个错误即整包失败，不得返回部分记录；错误响应给出一基行号、零基字节位置和原因：字段内容非法取该字段首个违规字节，公历时间无效取 0，短行取实际长度，长行取 37，缺少末尾 LF 取 37。相同字节输入必须产生相同摘要和逐行结果。使用 Go 1.25、Gin 与 testify，并以 Docker Compose 启动 API；宿主端口可由 API_PORT 覆盖，仓库提供名为 verify 的一次性验收服务及覆盖合法解析、边界错误和确定性的测试。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "e5ce4637183b", "repo_name": "wheel-rim-defect-segmenter", "task_type": "0-1 代码生成", "project_category": "全栈", "language_framework": "Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker", "summary": "现场更换探头或耦合剂后，检修员要先用已知厚度的参考试块校准声程，本次从零建立独立的声程校准记录模块，不借用缺陷区段或基线补偿对象。 … 用后端单元与接口测试锁定精确直线、单点超差和退化输入，再以一个 Playwright 流程完成录入、提交及不合格点高亮；原判读接口和页面仍可使用，Compose 的 API_PORT、WEB_PORT"} -->
+## 0049-3 · wheel-rim-defect-segmenter
+
+- 创建时间：2026-09-13 06:41:43 +0800
+- 项目类别：全栈
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker
+
+### User Prompt
+
+<!-- prompt-start -->
+现场更换探头或耦合剂后，检修员要先用已知厚度的参考试块校准声程，本次从零建立独立的声程校准记录模块，不借用缺陷区段或基线补偿对象。校准入口接收记录名称、三至八个厚度与往返时间测点及允许残差，提交后由 FastAPI 返回拟合声速、零点偏移、各点预测时间和残差，并把记录评定为未评定、合格或不合格。核心按普通最小二乘拟合直线，所有厚度和时间应为正有限数且厚度互异，测点不足、重复厚度、退化斜率或非法容差要定位到具体字段，失败后页面清除旧曲线与结论。React 在现有判读台增加“声程校准”入口，以表格编辑测点并绘制实测点和拟合线，结果区突出最大绝对残差点，让检修员能从返回明细复算结论。用后端单元与接口测试锁定精确直线、单点超差和退化输入，再以一个 Playwright 流程完成录入、提交及不合格点高亮；原判读接口和页面仍可使用，Compose 的 API_PORT、WEB_PORT 覆盖方式保持有效。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "91cb10c81470", "repo_name": "gallery-light-cue-rehearsal", "task_type": "0-1 代码生成", "project_category": "纯前端", "language_framework": "TypeScript, React, Vite, Vitest, Playwright, Docker, Docker Compose", "summary": "展厅闭馆后的灯光联排常因浏览器标签页降频而跳慢，技术员需要确认一串提示在暂停、恢复和回调延迟后仍落在正确时间线上。 … 最后一项到期后界面稳定显示“已完成”、全部提示的计划截止时间及实际处理时间，使验收者能看到一次长延迟虽造成集中处理，却没有延长整段演练。"} -->
+## 0052 · gallery-light-cue-rehearsal
+
+- 创建时间：2026-09-13 08:46:01 +0800
+- 项目类别：纯前端
+- 任务难度：待评估
+- 语言/框架：TypeScript, React, Vite, Vitest, Playwright, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+展厅闭馆后的灯光联排常因浏览器标签页降频而跳慢，技术员需要确认一串提示在暂停、恢复和回调延迟后仍落在正确时间线上。请使用 TypeScript、React 与 Vite 从空仓库实现纯前端演练器；Docker Compose 启动页面，宿主端口由 WEB_PORT 覆盖，并提供名为 verify 的一次性验收服务，Vitest 与 Playwright 覆盖计时链路，README 在此处说明启动和 JSON 格式，禁止固定轨迹或占位按钮。页面导入 UTF-8 JSON 数组，每项只能含唯一 id、非空 label 和整数 durationMs，durationMs 范围为 100 至 600000；任一项非法则整份拒绝且不得替换当前有效数据。启动后以数组顺序执行，使用可测试的单调时钟计算截止时刻，不得靠递减 tick 累计；暂停只冻结当前项剩余毫秒数，恢复以该余量建立新截止时刻。延迟回调若跨过多项，须按各自截止时刻依次记入轨迹并直接显示当前应执行项；未载入时启动、状态不符的重复操作均就地报错且不改变状态。最后一项到期后界面稳定显示“已完成”、全部提示的计划截止时间及实际处理时间，使验收者能看到一次长延迟虽造成集中处理，却没有延长整段演练。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "e635b888de57", "repo_name": "tunnel-profile-clearance-api", "task_type": "0-1 代码生成", "project_category": "纯后端", "language_framework": "Python 3.12, FastAPI, Pydantic, pytest, Docker, Docker Compose", "summary": "激光测量复核人员需要把同一隧道断面的本期测点与基准测点对齐，排除仪器整体平移后识别真正发生位移的位置，形成可保存的断面变化报告。 … 保持原有两个净距接口、健康检查和API_PORT编排行为不变，在模型、独立比较服务、FastAPI路由及pytest与验收脚本间打通契约，端到端验证纯整体平移全部合格、单点真实位移被定位、并列选择稳定"} -->
+## 0040-3 · tunnel-profile-clearance-api
+
+- 创建时间：2026-09-13 09:28:01 +0800
+- 项目类别：纯后端
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, pytest, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+激光测量复核人员需要把同一隧道断面的本期测点与基准测点对齐，排除仪器整体平移后识别真正发生位移的位置，形成可保存的断面变化报告。实现POST /api/profiles/compare，请求接收两组按唯一测点名称对应的毫米整数坐标、一个共同存在的基准点名称和位移容差，响应给出对齐修正量、逐点修正后坐标与位移、最大位移测点、超限名称列表及整体是否合格。比较层以两组基准点的坐标差平移全部本期测点，再用未舍入欧氏距离判断容差，输出距离按现有规则保留三位小数，最大值并列时选择输入顺序靠前的测点。两组名称顺序或数量不一致、名称重复、基准点缺失、容差为负以及修正后坐标越界均返回现有422错误信封，定位到具体列表项或字段，任何校验失败都不生成部分报告。保持原有两个净距接口、健康检查和API_PORT编排行为不变，在模型、独立比较服务、FastAPI路由及pytest与验收脚本间打通契约，端到端验证纯整体平移全部合格、单点真实位移被定位、并列选择稳定和名称不匹配被拒绝。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "dc09c08ddcd3", "repo_name": "seismic-trace-resumable-ingest", "task_type": "0-1 代码生成", "project_category": "纯后端", "language_framework": "Python 3.12, FastAPI, SQLAlchemy, PostgreSQL, pytest, Docker, Docker Compose", "summary": "工程师在交付同一测线的两份封存记录包前，需要定位内容是否一致及首个差异字节，而不是下载整包后自行比对。 … pytest 通过不同分块边界的相同内容、共同前缀后的单字节差异、前缀相同但长度不同三类记录核对结论和偏移，并验证非封存请求无写入、查询结果经压实与 API 重启仍稳定，Compose 继续支持 AP"} -->
+## 0044-7 · seismic-trace-resumable-ingest
+
+- 创建时间：2026-09-13 11:23:25 +0800
+- 项目类别：纯后端
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, SQLAlchemy, PostgreSQL, pytest, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+工程师在交付同一测线的两份封存记录包前，需要定位内容是否一致及首个差异字节，而不是下载整包后自行比对。引入不可变的比对记录，提交基准会话与候选会话后，同步校验两份归档的分块连续性、块摘要和整包摘要，再按偏移流式比较并持久化双方长度与摘要快照、相同前缀长度、首个差异偏移及一致、内容不同或长度不同的结论。创建接口返回 201 和完整结果，查询接口凭比对标识重取同一记录；结果应跨进程重启保留，任一记录后来压实也不能改变已保存的快照。只有两端均已封存才执行，未知会话按现有未找到错误反馈，活动或失败会话返回能指出基准端或候选端及其状态的冲突，归档校验异常不得留下比对记录，现有上传、封存、压实、审计和下载契约保持兼容。pytest 通过不同分块边界的相同内容、共同前缀后的单字节差异、前缀相同但长度不同三类记录核对结论和偏移，并验证非封存请求无写入、查询结果经压实与 API 重启仍稳定，Compose 继续支持 API_PORT 覆盖。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "4dae4d035660", "repo_name": "spoken-clip-calibrator", "task_type": "0-1 代码生成", "project_category": "纯前端", "language_framework": "TypeScript, React, Vite, HTMLMediaElement, Vitest, Playwright, Docker, Docker Compose", "summary": "整理员面对较长口述录音时缺少全局声量参照，请实现本地音频振幅概览模块；音频载入后自动生成独立的 AudioEnvelope 对象，呈现整段峰值轮廓，点击轮廓可将共享播放器定位到对应整数毫秒。 … Vitest 以合成多声道采样验证分桶、归一化、静音和位置换算，Playwright 载入仓库短音频后确认轮廓就绪、点击可预测位置并继续捕获片段，再模拟分析失败证明原清单不变，npm run veri"} -->
+## 0048-6 · spoken-clip-calibrator
+
+- 创建时间：2026-09-13 12:30:11 +0800
+- 项目类别：纯前端
+- 任务难度：待评估
+- 语言/框架：TypeScript, React, Vite, HTMLMediaElement, Vitest, Playwright, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+整理员面对较长口述录音时缺少全局声量参照，请实现本地音频振幅概览模块；音频载入后自动生成独立的 AudioEnvelope 对象，呈现整段峰值轮廓，点击轮廓可将共享播放器定位到对应整数毫秒。分析服务接收 File 和目标桶数，以浏览器解码后的各声道绝对峰值按时长等分，返回 durationMs、bucketCount 与 0 至 1 的 peaks，结果不依赖画布尺寸或播放进度。React 用分析中、可用、失败三态管理可访问的 canvas 和时间提示，点击位置按横向比例换算并钳制到音频时长，定位前结束正在进行的单条或顺序审听。更换音频应清除旧概览并忽略迟到结果，分析失败只在概览区说明原因，不清空片段、选择或已加载音频；打点、校准、导入导出与播放边界保持兼容，全程不联网，Compose 继续支持 WEB_PORT。Vitest 以合成多声道采样验证分桶、归一化、静音和位置换算，Playwright 载入仓库短音频后确认轮廓就绪、点击可预测位置并继续捕获片段，再模拟分析失败证明原清单不变，npm run verify 可完成验收。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "3f2e7e282433", "repo_name": "tunnel-profile-clearance-api", "task_type": "0-1 代码生成", "project_category": "纯后端", "language_framework": "Python 3.12, FastAPI, Pydantic, pytest, Docker, Docker Compose", "summary": "隧道激光采集结束后，复核人员要确认设计指定的拱顶、侧墙和设备邻近控制点均被测量轨迹有效覆盖，避免断面净距计算建立在缺失区域上。 … 改动贯通请求响应模型、独立覆盖分析服务、FastAPI路由以及pytest与一次性验收脚本，端到端验证全部覆盖、首个遗漏仍返回完整结果、线段并列选择稳定和无效折线拒绝，并确认既有四个业务接口及API_"} -->
+## 0040-6 · tunnel-profile-clearance-api
+
+- 创建时间：2026-09-13 12:52:09 +0800
+- 项目类别：纯后端
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, pytest, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+隧道激光采集结束后，复核人员要确认设计指定的拱顶、侧墙和设备邻近控制点均被测量轨迹有效覆盖，避免断面净距计算建立在缺失区域上。实现POST /api/profiles/coverage，请求接收按序连接且不闭合的测量折线、带唯一名称的控制点列表和非负覆盖半径，响应按输入顺序给出每个控制点到折线的最短距离、最近线段起点索引、是否覆盖，并汇总首个未覆盖名称与整体结论。覆盖服务复用点到线段距离基础能力，以未舍入距离判断半径边界，输出按现有三位小数规则处理，多个线段距离相差不超过1e-9时选择起点索引较小者。测量折线少于两点或含相邻重合点、控制点名称为空白或重复、列表为空及半径非法时返回现有422错误信封并定位具体字段，任何错误都不生成部分报告。改动贯通请求响应模型、独立覆盖分析服务、FastAPI路由以及pytest与一次性验收脚本，端到端验证全部覆盖、首个遗漏仍返回完整结果、线段并列选择稳定和无效折线拒绝，并确认既有四个业务接口及API_PORT编排行为保持兼容。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "e3e3322a9aed", "repo_name": "interval-energy-apportionment-api", "task_type": "0-1 代码生成", "project_category": "纯后端", "language_framework": "Python 3.12, FastAPI, Pydantic, pytest, Docker, Docker Compose", "summary": "园区采集系统只保存电表累计示值，遇到计数器回零时，结算员目前无法可靠还原相邻采样点的区间电量，也无法判断一次下降是合法翻转还是坏数据。 … 通过新的请求响应模型、序列推导服务和路由形成闭环，pytest 固定普通与翻转混合序列的逐段结果、方向矛盾的定位反馈及边界示值，verify 用一组跨量程样本复算总量并确认旧分摊调用仍可用。"} -->
+## 0041-6 · interval-energy-apportionment-api
+
+- 创建时间：2026-09-13 12:53:58 +0800
+- 项目类别：纯后端
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, pytest, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+园区采集系统只保存电表累计示值，遇到计数器回零时，结算员目前无法可靠还原相邻采样点的区间电量，也无法判断一次下降是合法翻转还是坏数据。请建立独立的电表示值序列模块，结算员提交电表编号、三位小数的量程上限和按时间排列的采样点，并为每段声明普通递增或量程翻转，系统返回按起止时间排序的精确区间电量及整段合计。推导服务以最小电量单位做整数计算，普通段取后值减前值，翻转段取量程上限减前值再加后值，结果携带段类型并保证各段之和与总量一致。时间重复或逆序、示值超出量程、段类型与示值方向矛盾时，整次请求返回定位到具体采样点或段类型的错误，不产生部分区间；原有分摊接口、响应结构和容器端口配置不受影响。通过新的请求响应模型、序列推导服务和路由形成闭环，pytest 固定普通与翻转混合序列的逐段结果、方向矛盾的定位反馈及边界示值，verify 用一组跨量程样本复算总量并确认旧分摊调用仍可用。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+

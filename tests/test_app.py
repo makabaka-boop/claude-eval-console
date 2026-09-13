@@ -49,7 +49,6 @@ class ValidationTests(unittest.TestCase):
             "本次复核中",
             "未据此扣分",
             "属于环境故障",
-            "docker compose config --quiet",
             "逐项响应",
             "核心流程",
             "未影响定档",
@@ -69,15 +68,50 @@ class ValidationTests(unittest.TestCase):
         )
         self.assertIn("不要为了凑结构编造过程", app.EVALUATION_DESCRIPTION_GUIDANCE)
         self.assertIn("五个维度不要使用相同的开头", app.EVALUATION_DESCRIPTION_GUIDANCE)
-        self.assertIn("对象＋结果＋本轮独有数字或故障恢复", app.EVALUATION_DESCRIPTION_GUIDANCE)
+        self.assertIn("执行写具体工具动作、对象、结果与实际后果", app.EVALUATION_DESCRIPTION_GUIDANCE)
         self.assertIn("自然写明问题发生在第几轮", app.EVALUATION_DESCRIPTION_GUIDANCE)
         self.assertIn(
-            "至少一项客观证据",
+            "文件、函数、接口、命令、日志或报错中的真实依据",
             app.EVALUATION_DESCRIPTION_GUIDANCE,
         )
         self.assertIn("具体不足及其实际影响", app.EVALUATION_DESCRIPTION_GUIDANCE)
-        self.assertIn("不要为了省事把五项机械地都评为 5 分", app.EVALUATION_SCORE_GUIDANCE)
-        self.assertIn("如果轨迹中找不到真实不足，应改评 5 分", app.EVALUATION_DESCRIPTION_GUIDANCE)
+        self.assertIn("不能为了拉开分差编造不足", app.EVALUATION_SCORE_GUIDANCE)
+        self.assertIn(
+            "不能仅凭“最终检查通过”自动评 5 分",
+            app.EVALUATION_DESCRIPTION_GUIDANCE,
+        )
+        self.assertIn(
+            "不能因为没有找到另一条扣分依据就自动升为 5 分",
+            app.EVALUATION_DESCRIPTION_GUIDANCE,
+        )
+        self.assertIn(
+            "最终检查通过、没有剩余 Bug 或 next_action=complete 只能证明最终状态",
+            app.EVALUATION_SCORE_GUIDANCE,
+        )
+        self.assertIn(
+            "最终成果正确，但本轮由错误实现、错误测试、错误脚本或错误文档造成失败和返工时通常为 4 分",
+            app.EVALUATION_SCORE_GUIDANCE,
+        )
+        self.assertIn(
+            "普通实现、测试或工具失误没有违反 Prompt 时不能扣这一项",
+            app.EVALUATION_SCORE_GUIDANCE,
+        )
+        self.assertIn(
+            "没有正式任务清单或没有调用计划工具本身不能作为扣分点",
+            app.EVALUATION_SCORE_GUIDANCE,
+        )
+        self.assertIn(
+            "纯编辑笔误、命令参数写错或文本替换失败属于执行能力",
+            app.EVALUATION_SCORE_GUIDANCE,
+        )
+        self.assertIn(
+            "4 分允许一两次不影响结果的轻微冗余或失败调用",
+            app.EVALUATION_SCORE_GUIDANCE,
+        )
+        self.assertIn(
+            "具体步骤或工具调用，以及对应文件、函数、接口、命令",
+            app.EVALUATION_DESCRIPTION_GUIDANCE,
+        )
         self.assertIn("不直接抄写 `[0,2,1,1]`", app.EVALUATION_DESCRIPTION_GUIDANCE)
         self.assertIn("不出现 AI、AI 浏览器", app.EVALUATION_DESCRIPTION_GUIDANCE)
         self.assertIn("模型认为", app.EVALUATION_DESCRIPTION_GUIDANCE)
@@ -85,6 +119,19 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("把“未”写成“没有”或“还没”", app.EVALUATION_DESCRIPTION_GUIDANCE)
         self.assertIn("把“均”写成“都”", app.EVALUATION_DESCRIPTION_GUIDANCE)
         self.assertIn("把“包含”写成“有”", app.EVALUATION_DESCRIPTION_GUIDANCE)
+        self.assertIn(
+            "交付完整性优先写本项目已经产生的业务结果",
+            app.EVALUATION_DESCRIPTION_GUIDANCE,
+        )
+        self.assertIn(
+            "题面约束与具体文件、接口或可观察行为",
+            app.EVALUATION_DESCRIPTION_GUIDANCE,
+        )
+        self.assertIn("不要写“全部通过”", app.EVALUATION_DESCRIPTION_GUIDANCE)
+        self.assertIn(
+            "禁止使用“X 项成功，覆盖指定链路”",
+            app.EVALUATION_DESCRIPTION_GUIDANCE,
+        )
         for phrase in app.EVALUATION_DISALLOWED_PHRASES:
             self.assertIn(phrase, app.EVALUATION_DESCRIPTION_GUIDANCE)
         for phrase in app.EVALUATION_HIGH_RISK_FRAGMENTS:
@@ -140,6 +187,53 @@ class ValidationTests(unittest.TestCase):
             normalized["delivery"]["description"],
             "三个场景均已验证，尚未发现问题。",
         )
+
+    def test_all_passed_phrase_is_normalized_in_generated_manual_and_legacy_text(self):
+        evaluation = sample_evaluation()
+        evaluation["execution"]["description"] = "接口的 39 项检查全部通过。"
+
+        generated = app.normalize_evaluation(
+            json.loads(json.dumps(evaluation, ensure_ascii=False))
+        )
+        manual = app.normalize_manual_evaluation(evaluation)
+        legacy = app.turn_evaluation(
+            {
+                "turn_review_result": json.dumps(
+                    {"evaluation": evaluation}, ensure_ascii=False
+                )
+            }
+        )
+
+        for result in (generated, manual, legacy):
+            self.assertEqual(
+                result["execution"]["description"],
+                "接口的 39 项检查通过。",
+            )
+
+    def test_fixed_evaluation_closings_are_rejected(self):
+        for phrase in ("覆盖指定链路", "原有功能保持可用"):
+            evaluation = sample_evaluation()
+            evaluation["execution"]["description"] = (
+                f"接口检查得到成功结果，{phrase}。"
+            )
+            with self.subTest(phrase=phrase), self.assertRaisesRegex(
+                app.WorkflowError, "高风险公共片段"
+            ):
+                app.normalize_evaluation(evaluation)
+
+    def test_nonfull_location_and_deficiency_may_be_in_adjacent_sentences(self):
+        evaluation = sample_evaluation()
+        evaluation["delivery"] = {
+            "score": 4,
+            "description": (
+                "第 1 轮修改了 backend/tests/test_api.py 的边界输入。"
+                "两组测试数据计算错误并需要返工，增加了一次修正和复验。"
+            ),
+        }
+
+        normalized = app.normalize_evaluation(evaluation, 1)
+
+        self.assertEqual(normalized["delivery"]["score"], 4)
 
     def test_evaluation_rejects_raw_number_arrays(self):
         evaluation = sample_evaluation()
@@ -358,6 +452,25 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(app.WorkflowError, "满分描述包含扣分点"):
             app.normalize_evaluation(evaluation, 1)
 
+    def test_full_score_accepts_positive_absence_of_execution_errors(self):
+        evaluation = sample_evaluation()
+        evaluation["execution"]["description"] = (
+            "第 1 轮的 App.tsx 修改一次命中目标，检查记录得到 12 项通过；"
+            "没有发生错误修改、错误命令、重复读取、冗余调用或返工。"
+        )
+
+        normalized = app.normalize_evaluation(evaluation, 1)
+
+        self.assertEqual(normalized["execution"]["score"], 5)
+
+    def test_generic_quoted_labels_are_not_treated_as_trace_anchors(self):
+        anchors = app.evaluation_position_anchors(
+            "第 1 轮按“指令遵循”核对 App.tsx，不使用“现在写……”占位，"
+            "也不把“检查环境，然后实现扩展”当作证据。"
+        )
+
+        self.assertEqual(anchors, ["App.tsx"])
+
     def test_full_score_rejects_unfinished_verification(self):
         evaluation = sample_evaluation()
         evaluation["delivery"]["description"] = (
@@ -518,7 +631,11 @@ class ValidationTests(unittest.TestCase):
             app.validate_evaluation_trace_grounding(evaluation, trajectory)
 
     def test_evaluation_descriptions_reject_high_risk_public_fragments(self):
-        for phrase in app.EVALUATION_HIGH_RISK_FRAGMENTS:
+        for phrase in (
+            value
+            for value in app.EVALUATION_HIGH_RISK_FRAGMENTS
+            if value != "全部通过"
+        ):
             evaluation = sample_evaluation()
             evaluation["execution"]["description"] = f"处理完成，{phrase}。"
             with self.subTest(phrase=phrase), self.assertRaisesRegex(
@@ -526,14 +643,17 @@ class ValidationTests(unittest.TestCase):
             ):
                 app.normalize_evaluation(evaluation)
 
-    def test_evaluation_description_rejects_normalized_shared_command_fragment(self):
+    def test_evaluation_description_allows_a_traceable_command_reference(self):
         evaluation = sample_evaluation()
         evaluation["execution"]["description"] = (
             "组件测试通过，随后运行 `Docker-Compose CONFIG --quiet` 检查配置。"
         )
+        trajectory = (
+            'TOOL Bash: {"command": "Docker-Compose CONFIG --quiet"}'
+        )
 
-        with self.assertRaisesRegex(app.WorkflowError, "docker compose config --quiet"):
-            app.normalize_evaluation(evaluation)
+        normalized = app.normalize_evaluation(evaluation)
+        app.validate_evaluation_trace_commands(normalized, trajectory)
 
     def test_evaluation_command_anchor_must_exist_in_trace_tool_calls(self):
         evaluation = sample_evaluation()
@@ -651,6 +771,43 @@ class ValidationTests(unittest.TestCase):
             still_failing, failing_trajectory
         )
 
+    def test_evaluation_accepts_a_specific_coverage_gap_despite_green_suite(self):
+        evaluation = sample_evaluation()
+        evaluation["delivery"] = {
+            "score": 4,
+            "description": (
+                "第 1 轮的 backend/tests/test_api.py 得到 76 项检查通过。"
+                "现有用例没有验证两个请求同时写入的顺序，"
+                "因此并发行为缺少直接核对记录。"
+            ),
+        }
+        trajectory = (
+            'TOOL Bash: {"command": "python -m pytest -q"}\n'
+            'TOOL RESULT: 76 passed in 2.0s'
+        )
+
+        app.validate_evaluation_final_verification_consistency(
+            evaluation, trajectory
+        )
+
+    def test_zero_failed_summary_is_not_a_terminal_failure_claim(self):
+        evaluation = sample_evaluation()
+        evaluation["delivery"] = {
+            "score": 4,
+            "description": (
+                "第 2 轮最后一次后端检查为 18 项通过、0 项失败。"
+                "tests/test_api.py 的错误断言造成过返工，随后已经恢复。"
+            ),
+        }
+        trajectory = (
+            'TOOL Bash: {"command": "python -m pytest -q"}\n'
+            'TOOL RESULT: 18 passed in 2.0s'
+        )
+
+        app.validate_evaluation_final_verification_consistency(
+            evaluation, trajectory
+        )
+
     def test_final_verification_contradiction_is_retryable(self):
         self.assertTrue(
             app.retryable_review_output_error(
@@ -676,12 +833,14 @@ class ValidationTests(unittest.TestCase):
         )
         app.validate_evaluation_trace_commands(evaluation, trajectory)
 
-    def test_execution_description_rejects_command_even_when_present_in_trace(self):
+    def test_execution_description_allows_a_command_present_in_trace(self):
         evaluation = sample_evaluation()
         evaluation["execution"]["description"] = "最后执行 `make test`，检查了交接流程。"
+        trajectory = 'TOOL Bash: {"command": "make test"}'
 
-        with self.assertRaisesRegex(app.WorkflowError, "不能出现通用命令名称"):
-            app.normalize_evaluation(evaluation)
+        normalized = app.normalize_evaluation(evaluation)
+        app.validate_evaluation_trace_commands(normalized, trajectory)
+        self.assertIn("make test", normalized["execution"]["description"])
 
     def test_delivery_copy_uses_the_exact_requested_fields_in_order(self):
         source = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -911,6 +1070,9 @@ class ValidationTests(unittest.TestCase):
             self.assertIn(control, html)
         self.assertIn("SOLO_QA_BRIDGE_READY", javascript)
         self.assertIn("submitSelectedToSoloQa", javascript)
+        self.assertIn("orderSoloQaTurns", javascript)
+        self.assertIn("missingSoloQaPredecessor", javascript)
+        self.assertIn("需先提交或同时选择第", javascript)
         self.assertEqual(manifest["manifest_version"], 3)
         self.assertEqual(
             manifest["host_permissions"],
@@ -1907,6 +2069,7 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("不修改仓库、不生成修复题面", prompt)
         self.assertIn("本次评分对应第 1 轮", prompt)
         self.assertIn("后端检查：最后记录 12 项通过、0 项失败", prompt)
+        self.assertIn(app.EVALUATION_FINAL_RESULT_GUIDANCE, prompt)
         self.assertIn("后出现的结果覆盖同类早期结果", prompt)
         self.assertEqual(runner.call_args.kwargs["sandbox"], "workspace-write")
         self.assertEqual(result["task_type"], "Feature 迭代")
@@ -1933,6 +2096,7 @@ class ReviewTests(unittest.TestCase):
                     testcase.assertIn("--ignore-rules", args)
                     testcase.assertIn(app.EVALUATION_DESCRIPTION_GUIDANCE, input)
                     testcase.assertIn(app.EVALUATION_SCORE_GUIDANCE, input)
+                    testcase.assertIn(app.EVALUATION_FINAL_RESULT_GUIDANCE, input)
                     testcase.assertIn("交付完整性 (Delivery)", input)
                     testcase.assertIn("执行能力(Toolcall)", input)
                     testcase.assertIn("不得改用十分制", input)
@@ -2059,6 +2223,12 @@ class ReviewTests(unittest.TestCase):
             repaired["description"],
         )
         self.assertEqual(result["remaining_bugs"], [])
+        repair_prompt = runner.call_args_list[1].args[0]
+        self.assertIn("5 分不是删除负面句子后的兜底值", repair_prompt)
+        self.assertIn("不得仅因没有正式任务清单扣分", repair_prompt)
+        self.assertIn("不能用单纯编辑笔误代替推理错误", repair_prompt)
+        self.assertIn("错误命令、重复读取或冗余调用", repair_prompt)
+        self.assertIn(app.EVALUATION_FINAL_RESULT_GUIDANCE, repair_prompt)
         notifier.assert_called_once()
 
     def test_review_wording_exhaustion_keeps_code_result_for_manual_edit(self):
@@ -5971,6 +6141,7 @@ class ExportTests(unittest.TestCase):
                 row = app.delivery_export_row(app.completed_turn_rows()[0])
 
         self.assertEqual(summaries[0]["key"], "abc123abc123:1")
+        self.assertEqual(summaries[0]["session_id"], "session-export")
         self.assertEqual(summaries[0]["project_number"], "0007")
         self.assertEqual(summaries[0]["task_difficulty"], "困难")
         self.assertEqual(summaries[0]["prompt"], "完成真实导出链路")
@@ -6285,14 +6456,14 @@ class ExportTests(unittest.TestCase):
 
                 summary = app.completed_turns()[0]
                 with self.assertRaisesRegex(
-                    app.WorkflowError, "docker compose config --quiet"
+                    app.WorkflowError, "config --quiet"
                 ):
                     app.solo_qa_turn_payload("abc123abc123:1")
 
         self.assertFalse(summary["export_ready"])
         self.assertTrue(
             any(
-                "docker compose config --quiet" in issue
+                "config --quiet" in issue
                 for issue in summary["export_issues"]
             )
         )

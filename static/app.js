@@ -1,4 +1,4 @@
-const UI_VERSION = "20260912.2";
+const UI_VERSION = "20260913.1";
 const EXPORT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const TABLE_PAGE_SIZE = 20;
 
@@ -1027,6 +1027,39 @@ function soloQaSubmittable(turn) {
   return Boolean(turn.solo_qa_ready) && ["not_submitted", "failed", "remote_missing"].includes(stateName);
 }
 
+function soloQaConversationKey(turn) {
+  return String(turn.session_id || turn.run_id || "");
+}
+
+function orderSoloQaTurns(turns) {
+  const groups = new Map();
+  turns.forEach((turn) => {
+    const key = soloQaConversationKey(turn);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(turn);
+  });
+  return [...groups.values()].flatMap((group) =>
+    [...group].sort((first, second) => Number(first.turn_number) - Number(second.turn_number))
+  );
+}
+
+function missingSoloQaPredecessor(turns) {
+  const selectedKeys = new Set(turns.map((turn) => turn.key));
+  for (const turn of turns) {
+    const earlierTurns = state.completedTurns
+      .filter((candidate) =>
+        soloQaConversationKey(candidate) === soloQaConversationKey(turn)
+        && Number(candidate.turn_number) < Number(turn.turn_number)
+      )
+      .sort((first, second) => Number(first.turn_number) - Number(second.turn_number));
+    const missing = earlierTurns.find((candidate) =>
+      !selectedKeys.has(candidate.key) && !candidate.solo_qa?.remote_id
+    );
+    if (missing) return { turn, missing };
+  }
+  return null;
+}
+
 function renderSoloQaControls() {
   const bridgeStatus = $("#solo-qa-bridge-status");
   const detail = $("#solo-qa-status-detail");
@@ -1103,11 +1136,20 @@ async function syncSoloQa({ silent = false } = {}) {
 
 async function submitSelectedToSoloQa() {
   if (state.soloQaBusy) return;
-  const turns = state.completedTurns.filter((turn) =>
-    state.selectedExportTurns.has(turn.key) && soloQaSubmittable(turn)
+  const turns = orderSoloQaTurns(
+    state.completedTurns.filter((turn) =>
+      state.selectedExportTurns.has(turn.key) && soloQaSubmittable(turn)
+    ),
   );
   if (!turns.length) {
     showNotice("所选轮次都已提交，或尚未满足 SOLO-QA 提交条件");
+    return;
+  }
+  const predecessor = missingSoloQaPredecessor(turns);
+  if (predecessor) {
+    showNotice(
+      `${predecessor.turn.project_number || predecessor.turn.repo_name} 第 ${predecessor.turn.turn_number} 轮提交前，需先提交或同时选择第 ${predecessor.missing.turn_number} 轮`,
+    );
     return;
   }
   if (!await selectedTurnsPassPreflight(turns.map((turn) => turn.key))) return;

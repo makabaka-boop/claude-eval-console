@@ -462,12 +462,28 @@ async function submitOne(turnKey, loadFormSchema) {
   }
 }
 
+function orderTurnKeysByConversation(keys) {
+  const groups = new Map();
+  for (const key of keys) {
+    const [runId, turnNumber] = key.split(":");
+    if (!groups.has(runId)) groups.set(runId, []);
+    groups.get(runId).push({ key, turnNumber: Number(turnNumber) });
+  }
+  return [...groups.values()].flatMap((group) =>
+    group.sort((first, second) => first.turnNumber - second.turnNumber)
+      .map((item) => item.key)
+  );
+}
+
 async function submitBatch(payload) {
-  const keys = Array.isArray(payload?.turn_keys) ? [...new Set(payload.turn_keys.map(String))] : [];
-  if (!keys.length) throw new Error("请至少选择一个轮次");
-  if (keys.length > 100 || keys.some((key) => !TURN_KEY_RE.test(key))) {
+  const selectedKeys = Array.isArray(payload?.turn_keys)
+    ? [...new Set(payload.turn_keys.map(String))]
+    : [];
+  if (!selectedKeys.length) throw new Error("请至少选择一个轮次");
+  if (selectedKeys.length > 100 || selectedKeys.some((key) => !TURN_KEY_RE.test(key))) {
     throw new Error("提交轮次列表格式不正确");
   }
+  const keys = orderTurnKeysByConversation(selectedKeys);
   const results = [];
   let schemaPromise = null;
   const loadFormSchema = () => {
