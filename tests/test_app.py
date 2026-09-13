@@ -1058,6 +1058,7 @@ class ValidationTests(unittest.TestCase):
     def test_export_page_exposes_solo_qa_bridge_controls(self):
         html = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
         javascript = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        styles = (app.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
         manifest = json.loads(
             (app.SOLO_QA_EXTENSION_DIR / "manifest.json").read_text(encoding="utf-8")
         )
@@ -1073,6 +1074,17 @@ class ValidationTests(unittest.TestCase):
         self.assertIn("orderSoloQaTurns", javascript)
         self.assertIn("missingSoloQaPredecessor", javascript)
         self.assertIn("需先提交或同时选择第", javascript)
+        self.assertIn('function showNotice(message, tone = "error")', javascript)
+        self.assertIn(
+            'showNotice(state.soloQaLastMessage, failed ? "error" : "success")',
+            javascript,
+        )
+        self.assertIn(
+            '"评分修改已保存；后续导出和提交将使用人工版本",\n      "success",',
+            javascript,
+        )
+        self.assertIn(".notice { position: fixed;", styles)
+        self.assertIn(".notice.success", styles)
         self.assertEqual(manifest["manifest_version"], 3)
         self.assertEqual(
             manifest["host_permissions"],

@@ -977,3 +977,33 @@
 <!-- prompt-end -->
 <!-- task-entry-end -->
 
+<!-- task-entry-start {"run_id": "7ab99798f60b", "repo_name": "film-edgecode-converter", "task_type": "0-1 代码生成", "project_category": "纯前端", "language_framework": "TypeScript, React, Vite, Vitest, Playwright, Docker, Docker Compose", "summary": "电影资料馆交接胶片扫描片段时，边码中的英尺和帧位常被误当作普通十进制数，跨英尺定位便会偏离实际画格。 … 格式错误、越界或负偏移须定位到字段并保留上一份有效定位单，成功时同时展示规范化目标边码、总偏移帧数和可复制的交接文本，使跨英尺样例能够逐帧复算。"} -->
+## 0055 · film-edgecode-converter
+
+- 创建时间：2026-09-13 13:57:21 +0800
+- 项目类别：纯前端
+- 任务难度：待评估
+- 语言/框架：TypeScript, React, Vite, Vitest, Playwright, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+电影资料馆交接胶片扫描片段时，边码中的英尺和帧位常被误当作普通十进制数，跨英尺定位便会偏离实际画格。请从空仓库实现纯前端换算工作台，让编目员选择 35mm 四齿孔或三齿孔制式，输入起始边码后，可用目标边码求相对帧数，也可用非负相对帧数反算目标边码。项目采用 TypeScript、React 与 Vite；Docker Compose 仅承载前端且宿主端口由 WEB_PORT 覆盖，仓库提供名为 verify 的一次性验收服务，Vitest 覆盖进位边界，Playwright 贯通录入与复制，README 随换算规则说明运行方式，不得调用在线服务或返回固定结果。边码格式固定为卷号-英尺+帧位，其中卷号为四位数字、英尺为六位数字；四齿孔每英尺 16 帧，合法帧位为 00 至 15，三齿孔每英尺 21 帧，合法帧位为 00 至 20。两端卷号必须相同，目标不得早于起点，所有运算使用整数且不作舍入；切换制式立即清除旧结果，但保留当前输入供修正。格式错误、越界或负偏移须定位到字段并保留上一份有效定位单，成功时同时展示规范化目标边码、总偏移帧数和可复制的交接文本，使跨英尺样例能够逐帧复算。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "65ac3de0597d", "repo_name": "subtitle-cue-tap-aligner", "task_type": "0-1 代码生成", "project_category": "全栈", "language_framework": "Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker", "summary": "字幕联排时，操作员的敲击可能同时靠近两条计划提示，人工选择会让同一场记录出现不同配对。 … 通过 Docker Compose 启动 Web 与 API，WEB_PORT、API_PORT 可覆盖宿主端口，并提供名为 verify 的一次性验收服务。"} -->
+## 0056 · subtitle-cue-tap-aligner
+
+- 创建时间：2026-09-13 14:00:00 +0800
+- 项目类别：全栈
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker
+
+### User Prompt
+
+<!-- prompt-start -->
+字幕联排时，操作员的敲击可能同时靠近两条计划提示，人工选择会让同一场记录出现不同配对。请从空仓库起步，建立供剧场字幕操作员使用的全栈对点台。React 页面接收计划时间表，每行格式为“字幕文本|整数毫秒”；字幕不得为空，时间不得为负，且各行时间必须严格递增、不重复，错误需定位到具体行，非法导入不得覆盖上一份有效结果。开始联排后，以浏览器单调时钟记录每次敲击相对首击的整数毫秒，并提交 FastAPI。服务按敲击时间升序处理，每条计划和敲击至多使用一次，只考虑绝对偏差不超过 800 毫秒的计划；选择绝对偏差最小者，若相同则选择时间较早者。页面逐行连接已配对的计划与敲击，显示原始时间及带符号偏差，并分别列出所有未配对计划和敲击，不再增加独立的合格阈值或分类裁决。采用 Python 3.12、FastAPI、Pydantic、TypeScript、React 与 Vite，使用 pytest、Vitest、Playwright 覆盖解析、配对及页面联调，禁止写死结果。通过 Docker Compose 启动 Web 与 API，WEB_PORT、API_PORT 可覆盖宿主端口，并提供名为 verify 的一次性验收服务。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+

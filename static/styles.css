@@ -99,7 +99,9 @@ a { color: inherit; }
 .model-switcher button { padding: 7px 10px; border: 0; border-radius: 7px; color: white; background: var(--accent); font-size: 9px; font-weight: 800; }
 .model-switcher button:disabled { cursor: wait; opacity: .55; }
 .model-switcher small { position: absolute; left: 11px; right: 7px; bottom: 4px; overflow: hidden; color: #667680; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
-.notice { max-width: 1380px; margin: 0 auto 18px; padding: 12px 15px; border: 1px solid #ecd0d0; border-radius: 10px; color: #9b3c3c; background: #fff2f2; font-size: 12px; }
+.notice { position: fixed; z-index: 1000; top: 104px; right: 24px; width: min(420px, calc(100vw - 32px)); padding: 13px 16px; border: 1px solid #ecd0d0; border-radius: 11px; color: #9b3c3c; background: #fff2f2; box-shadow: 0 14px 34px rgba(31, 43, 50, .18); font-size: 12px; line-height: 1.55; animation: notice-in .18s ease-out; }
+.notice.success { border-color: #9fd3c1; color: #165c49; background: #e8f7f1; box-shadow: 0 14px 34px rgba(29, 111, 87, .18); }
+@keyframes notice-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 .view { max-width: 1380px; margin: 0 auto; }
 .module-tabs { max-width: 1380px; margin: -10px auto 18px; padding: 5px; display: flex; gap: 4px; border: 1px solid #dfe6e5; border-radius: 12px; background: rgba(255,255,255,.82); box-shadow: 0 7px 22px rgba(31,43,50,.04); }
 .module-tab { min-width: 112px; padding: 10px 17px; border: 0; border-radius: 8px; color: #68766f; background: transparent; font-size: 11px; font-weight: 800; transition: color .16s ease, background .16s ease, box-shadow .16s ease; }

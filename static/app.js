@@ -214,11 +214,15 @@ async function api(path, options = {}) {
   return data;
 }
 
-function showNotice(message) {
+function showNotice(message, tone = "error") {
   notice.textContent = message;
+  notice.classList.toggle("success", tone === "success");
   notice.classList.remove("hidden");
   window.clearTimeout(showNotice.timer);
-  showNotice.timer = window.setTimeout(() => notice.classList.add("hidden"), 7000);
+  showNotice.timer = window.setTimeout(
+    () => notice.classList.add("hidden"),
+    tone === "success" ? 5000 : 7000,
+  );
 }
 
 function phaseLabel(phase) {
@@ -1174,7 +1178,7 @@ async function submitSelectedToSoloQa() {
       ? `已提交 ${submitted} 条、找回 ${recovered} 条；在 ${failed.turn_key} 停止：${failed.error}${result.remaining ? `，剩余 ${result.remaining} 条未处理` : ""}`
       : `提交完成：新增 ${submitted} 条${recovered ? `，找回已有 ${recovered} 条` : ""}${skipped ? `，跳过 ${skipped} 条` : ""}`;
     await loadCompletedTurns();
-    showNotice(state.soloQaLastMessage);
+    showNotice(state.soloQaLastMessage, failed ? "error" : "success");
   } catch (error) {
     state.soloQaLastMessage = error.message;
     showNotice(error.message);
@@ -1476,7 +1480,10 @@ async function saveExportEvaluation(turnKey, reset = false) {
     state.exportEvaluationDrafts.delete(turnKey);
     state.exportPreflight = null;
     await loadCompletedTurns();
-    showNotice(reset ? "已恢复自动评分；后续导出和提交将使用自动版本" : "评分修改已保存；后续导出和提交将使用人工版本");
+    showNotice(
+      reset ? "已恢复自动评分；后续导出和提交将使用自动版本" : "评分修改已保存；后续导出和提交将使用人工版本",
+      "success",
+    );
   } catch (error) {
     showNotice(error.message);
   } finally {
