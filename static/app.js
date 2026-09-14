@@ -1,4 +1,4 @@
-const UI_VERSION = "20260914.3";
+const UI_VERSION = "20260914.7";
 const EXPORT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const TABLE_PAGE_SIZE = 20;
 
@@ -16,10 +16,16 @@ const state = {
   iterationPollers: {},
   filters: { query: "", taskType: "", category: "", status: "" },
   runPage: 1,
+  runPagination: { page: 1, pageSize: TABLE_PAGE_SIZE, totalPages: 1, totalItems: 0, allTotal: 0, startItem: 0, endItem: 0 },
+  runHasGenerationJob: false,
+  runLoadSequence: 0,
   completedTurns: [],
   exportPage: 1,
+  exportPagination: { page: 1, pageSize: TABLE_PAGE_SIZE, totalPages: 1, totalItems: 0, allTotal: 0, startItem: 0, endItem: 0 },
+  exportLoadSequence: 0,
   exportLastLoadedAt: 0,
   selectedExportTurns: new Set(),
+  selectedExportTurnDetails: new Map(),
   expandedExportPrompts: new Set(),
   exportEvaluationDrafts: new Map(),
   exportEvaluationBusy: new Set(),
@@ -59,6 +65,7 @@ const pageTitle = $("#page-title");
 const pageDescription = $("#page-description");
 const newRunButton = $("#new-run-button");
 const notice = $("#notice");
+const backToTopButton = $("#back-to-top");
 
 const phaseInfo = {
   generation_queued: ["题目生成排队中", "running"],
@@ -107,22 +114,7 @@ function exportSoloQaState(turn) {
 }
 
 function filteredCompletedTurns() {
-  const filters = state.exportFilters;
-  const query = filters.query.trim().toLocaleLowerCase("zh-CN");
-  return state.completedTurns.filter((turn) => {
-    const haystack = [turn.project_number, turn.repo_name, turn.run_id, turn.task_type]
-      .join(" ")
-      .toLocaleLowerCase("zh-CN");
-    const completedDate = String(turn.completed_at || "").match(/^\d{4}-\d{2}-\d{2}/)?.[0] || "";
-    const readiness = turn.export_ready ? "ready" : "blocked";
-    return (!query || haystack.includes(query))
-      && (!filters.taskType || turn.task_type === filters.taskType)
-      && (!filters.difficulty || (turn.task_difficulty || "未记录") === filters.difficulty)
-      && (!filters.readiness || readiness === filters.readiness)
-      && (!filters.soloQaState || exportSoloQaState(turn) === filters.soloQaState)
-      && (!filters.dateFrom || completedDate >= filters.dateFrom)
-      && (!filters.dateTo || completedDate <= filters.dateTo);
-  });
+  return state.completedTurns;
 }
 
 function escapeHtml(value) {
@@ -134,19 +126,25 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function paginateItems(items, requestedPage) {
-  const totalItems = items.length;
-  const totalPages = Math.max(1, Math.ceil(totalItems / TABLE_PAGE_SIZE));
-  const page = Math.min(totalPages, Math.max(1, Number(requestedPage) || 1));
-  const startIndex = (page - 1) * TABLE_PAGE_SIZE;
+function paginationFromResponse(response) {
   return {
-    items: items.slice(startIndex, startIndex + TABLE_PAGE_SIZE),
-    page,
-    totalPages,
-    totalItems,
-    startItem: totalItems ? startIndex + 1 : 0,
-    endItem: Math.min(totalItems, startIndex + TABLE_PAGE_SIZE),
+    page: Number(response.page || 1),
+    pageSize: Number(response.page_size || TABLE_PAGE_SIZE),
+    totalPages: Number(response.total_pages || 1),
+    totalItems: Number(response.total || 0),
+    allTotal: Number(response.all_total ?? response.total ?? 0),
+    startItem: Number(response.start_item || 0),
+    endItem: Number(response.end_item || 0),
   };
+}
+
+function listQuery(values) {
+  const params = new URLSearchParams();
+  Object.entries(values).forEach(([key, value]) => {
+    if (value !== "" && value !== null && value !== undefined) params.set(key, String(value));
+  });
+  const query = params.toString();
+  return query ? `?${query}` : "";
 }
 
 function paginationPageButtons(scope, page, totalPages) {
@@ -163,9 +161,10 @@ function paginationPageButtons(scope, page, totalPages) {
 
 function renderTablePagination(scope, pagination) {
   const disabled = pagination.totalPages <= 1 ? "disabled" : "";
+  const pageSize = pagination.pageSize || TABLE_PAGE_SIZE;
   const summary = pagination.totalItems
-    ? `第 ${pagination.startItem}–${pagination.endItem} 条，共 ${pagination.totalItems} 条 · 每页 ${TABLE_PAGE_SIZE} 条`
-    : `共 0 条 · 每页 ${TABLE_PAGE_SIZE} 条`;
+    ? `第 ${pagination.startItem}–${pagination.endItem} 条，共 ${pagination.totalItems} 条 · 每页 ${pageSize} 条`
+    : `共 0 条 · 每页 ${pageSize} 条`;
   const controls = `<span class="pagination-summary">${summary}</span>
     <span class="pagination-actions">
       <button type="button" data-page-scope="${escapeHtml(scope)}" data-page-target="1" ${pagination.page <= 1 ? "disabled" : ""}>首页</button>
@@ -181,15 +180,15 @@ function renderTablePagination(scope, pagination) {
   });
 }
 
-function changeTablePage(scope, requestedPage) {
+async function changeTablePage(scope, requestedPage) {
   if (scope === "runs") {
     state.runPage = requestedPage;
-    renderRunList();
+    await loadRuns();
     return;
   }
   if (scope === "exports") {
     state.exportPage = requestedPage;
-    renderExportPage();
+    await loadCompletedTurns();
   }
 }
 
@@ -225,6 +224,19 @@ function showNotice(message, tone = "error") {
   );
 }
 
+function updateBackToTopVisibility() {
+  backToTopButton.classList.toggle("hidden", window.scrollY < 480);
+}
+
+function scheduleBackToTopVisibility() {
+  if (scheduleBackToTopVisibility.pending) return;
+  scheduleBackToTopVisibility.pending = true;
+  window.requestAnimationFrame(() => {
+    scheduleBackToTopVisibility.pending = false;
+    updateBackToTopVisibility();
+  });
+}
+
 function phaseLabel(phase) {
   return phaseInfo[phase] || [phase || "未知", ""];
 }
@@ -245,9 +257,9 @@ function isRunning(phase) {
 
 function renderNewRunButtonState() {
   const generating = state.runs.find((run) => ["generation_queued", "generation_running"].includes(run.phase));
-  newRunButton.disabled = Boolean(generating);
-  newRunButton.innerHTML = generating
-    ? `${escapeHtml(generating.project_number || "新任务")} · 题目生成中…`
+  newRunButton.disabled = state.runHasGenerationJob;
+  newRunButton.innerHTML = state.runHasGenerationJob
+    ? `${escapeHtml(generating?.project_number || "新任务")} · 题目生成中…`
     : '<span>＋</span> 新建任务';
 }
 
@@ -338,6 +350,10 @@ function renderHealth() {
   }
   renderDirectoryPreview();
   $("#parallel-status").textContent = `并行 ${state.health.active_jobs} / ${state.health.max_parallel}${state.health.queued_jobs ? ` · 排队 ${state.health.queued_jobs}` : ""}`;
+  const maxParallelInput = $("#max-parallel-runs");
+  if (maxParallelInput && !maxParallelInput.disabled) {
+    maxParallelInput.value = String(state.health.max_parallel || 4);
+  }
   const refill = state.health.auto_refill || {};
   const refillRow = $("#auto-refill-row");
   const refillButton = $("#auto-refill-toggle");
@@ -419,38 +435,19 @@ function renderRunList() {
   const list = $("#run-list");
   const visibleRuns = filteredRuns();
   const backgroundCount = state.runs.filter((run) => run.background_generation).length;
-  const persistentCount = state.runs.length - backgroundCount;
+  const persistentCount = state.runPagination.totalItems;
   renderNewRunButtonState();
-  $("#record-count").textContent = visibleRuns.length === state.runs.length
-    ? `${persistentCount} 条记录${backgroundCount ? ` · ${backgroundCount} 个后台生成` : ""}`
-    : `${visibleRuns.length} / ${state.runs.length} 项`;
-  if (!state.runs.length) {
-    state.runPage = 1;
-    renderTablePagination("runs", paginateItems([], state.runPage));
+  $("#record-count").textContent = `${persistentCount} 条匹配记录${backgroundCount ? ` · ${backgroundCount} 个后台生成` : ""}`;
+  renderTablePagination("runs", state.runPagination);
+  if (!state.runPagination.allTotal && !backgroundCount) {
     list.innerHTML = '<tr><td colspan="8" class="table-empty">还没有运行记录</td></tr>';
     return;
   }
   if (!visibleRuns.length) {
-    state.runPage = 1;
-    renderTablePagination("runs", paginateItems([], state.runPage));
     list.innerHTML = '<tr><td colspan="8" class="table-empty">没有符合筛选条件的运行记录</td></tr>';
     return;
   }
-  const sortedRuns = [...visibleRuns].sort((first, second) => {
-    const numericSort = ["current_turn", "project_number"].includes(state.sortKey);
-    const firstValue = numericSort
-      ? Number(first[state.sortKey] || 0)
-      : String(first[state.sortKey] || first.updated_at || "");
-    const secondValue = numericSort
-      ? Number(second[state.sortKey] || 0)
-      : String(second[state.sortKey] || second.updated_at || "");
-    const result = firstValue < secondValue ? -1 : firstValue > secondValue ? 1 : 0;
-    return state.sortDirection === "asc" ? result : -result;
-  });
-  const pagination = paginateItems(sortedRuns, state.runPage);
-  state.runPage = pagination.page;
-  renderTablePagination("runs", pagination);
-  list.innerHTML = pagination.items.map((run) => {
+  list.innerHTML = visibleRuns.map((run) => {
     const [label, tone] = run.imported_baseline
       ? ["基线已导入", "complete"]
       : displayedRunPhase(run);
@@ -1017,17 +1014,39 @@ async function loadHealth() {
 }
 
 async function loadRuns(keepSelection = true) {
+  const sequence = ++state.runLoadSequence;
   try {
-    const [runs, backgroundJobs] = await Promise.all([
-      api("/api/runs"),
+    const query = listQuery({
+      page: state.runPage,
+      page_size: TABLE_PAGE_SIZE,
+      query: state.filters.query.trim(),
+      task_type: state.filters.taskType,
+      category: state.filters.category,
+      status: state.filters.status,
+      sort: state.sortKey,
+      direction: state.sortDirection,
+    });
+    const [page, backgroundJobs] = await Promise.all([
+      api(`/api/runs${query}`),
       api("/api/runs/background-jobs"),
     ]);
-    state.runs = [...runs, ...backgroundJobs];
+    if (sequence !== state.runLoadSequence) return;
+    state.runPagination = paginationFromResponse(page);
+    state.runPage = state.runPagination.page;
+    state.runHasGenerationJob = Boolean(page.has_generation_job);
+    const merged = [...backgroundJobs, ...(page.active_items || []), ...(page.items || [])];
+    state.runs = [...new Map(merged.map((run) => [run.id, run])).values()];
     if (!keepSelection && state.runs.length) state.selectedId = state.runs[0].id;
     renderRunList();
   } catch (error) {
+    if (sequence !== state.runLoadSequence) return;
     showNotice(error.message);
   }
+}
+
+function scheduleRunReload() {
+  window.clearTimeout(scheduleRunReload.timer);
+  scheduleRunReload.timer = window.setTimeout(() => loadRuns(), 220);
 }
 
 async function loadDetail() {
@@ -1070,16 +1089,8 @@ function orderSoloQaTurns(turns) {
 function missingSoloQaPredecessor(turns) {
   const selectedKeys = new Set(turns.map((turn) => turn.key));
   for (const turn of turns) {
-    const earlierTurns = state.completedTurns
-      .filter((candidate) =>
-        soloQaConversationKey(candidate) === soloQaConversationKey(turn)
-        && Number(candidate.turn_number) < Number(turn.turn_number)
-      )
-      .sort((first, second) => Number(first.turn_number) - Number(second.turn_number));
-    const missing = earlierTurns.find((candidate) =>
-      !selectedKeys.has(candidate.key) && !candidate.solo_qa?.remote_id
-    );
-    if (missing) return { turn, missing };
+    const missing = turn.unsubmitted_predecessor;
+    if (missing && !selectedKeys.has(missing.key)) return { turn, missing };
   }
   return null;
 }
@@ -1108,9 +1119,9 @@ function renderSoloQaControls() {
   detail.textContent = state.soloQaLastMessage || (state.soloQaBridgeReady
     ? "历史状态按需手动同步；提交时只核对所选轮次，并自动上传对应轨迹。"
     : "安装一次 Chrome 提交助手后，可同步历史提交并自动上传轨迹。");
-  const selected = state.completedTurns.filter((turn) =>
-    state.selectedExportTurns.has(turn.key) && soloQaSubmittable(turn)
-  ).length;
+  const selected = [...state.selectedExportTurns]
+    .map((key) => state.selectedExportTurnDetails.get(key))
+    .filter((turn) => turn && soloQaSubmittable(turn)).length;
   syncButton.disabled = !state.soloQaBridgeReady || state.soloQaBusy;
   submitButton.disabled = !state.soloQaBridgeReady || state.soloQaBusy || state.exportPreflightBusy || selected === 0;
   submitButton.textContent = selected > 0 ? `提交所选轮次（${selected}）` : "提交所选轮次";
@@ -1161,9 +1172,9 @@ async function syncSoloQa({ silent = false } = {}) {
 async function submitSelectedToSoloQa() {
   if (state.soloQaBusy) return;
   const turns = orderSoloQaTurns(
-    state.completedTurns.filter((turn) =>
-      state.selectedExportTurns.has(turn.key) && soloQaSubmittable(turn)
-    ),
+    [...state.selectedExportTurns]
+      .map((key) => state.selectedExportTurnDetails.get(key))
+      .filter((turn) => turn && soloQaSubmittable(turn)),
   );
   if (!turns.length) {
     showNotice("所选轮次都已提交，或尚未满足 SOLO-QA 提交条件");
@@ -1243,21 +1254,42 @@ window.addEventListener("message", (event) => {
 });
 
 async function loadCompletedTurns() {
+  const sequence = ++state.exportLoadSequence;
   try {
-    state.completedTurns = await api("/api/exports/turns");
+    const filters = state.exportFilters;
+    const query = listQuery({
+      page: state.exportPage,
+      page_size: TABLE_PAGE_SIZE,
+      query: filters.query.trim(),
+      task_type: filters.taskType,
+      difficulty: filters.difficulty,
+      readiness: filters.readiness,
+      solo_qa_state: filters.soloQaState,
+      date_from: filters.dateFrom,
+      date_to: filters.dateTo,
+    });
+    const page = await api(`/api/exports/turns${query}`);
+    if (sequence !== state.exportLoadSequence) return;
+    state.completedTurns = page.items || [];
+    state.exportPagination = paginationFromResponse(page);
+    state.exportPage = state.exportPagination.page;
     state.exportLastLoadedAt = Date.now();
-    const validKeys = new Set(state.completedTurns.map((turn) => turn.key));
-    state.selectedExportTurns = new Set(
-      [...state.selectedExportTurns].filter((key) => validKeys.has(key))
-    );
-    state.expandedExportPrompts = new Set(
-      [...state.expandedExportPrompts].filter((key) => validKeys.has(key))
-    );
+    state.completedTurns.forEach((turn) => {
+      if (state.selectedExportTurns.has(turn.key)) {
+        state.selectedExportTurnDetails.set(turn.key, turn);
+      }
+    });
     renderExportPage();
   } catch (error) {
+    if (sequence !== state.exportLoadSequence) return;
     showNotice(error.message);
     $("#export-turn-list").innerHTML = '<tr><td colspan="11" class="table-empty">已完成轮次读取失败</td></tr>';
   }
+}
+
+function scheduleExportReload() {
+  window.clearTimeout(scheduleExportReload.timer);
+  scheduleExportReload.timer = window.setTimeout(() => loadCompletedTurns(), 220);
 }
 
 function exportPreflightByKey() {
@@ -1275,7 +1307,7 @@ function renderExportPreflightSummary() {
   const result = state.exportPreflight;
   if (!result) {
     panel.className = "export-preflight-panel";
-    panel.innerHTML = "<strong>尚未执行提交前检查</strong><span>未勾选时检查列表中的全部完成轮次；勾选后只检查所选轮次。</span>";
+    panel.innerHTML = "<strong>尚未执行提交前检查</strong><span>未勾选时检查当前页；勾选后只检查所选轮次。</span>";
     return;
   }
   const summary = result.summary || {};
@@ -1293,9 +1325,11 @@ function updateExportSelectionControls() {
   const visibleKeys = new Set(visibleTurns.map((turn) => turn.key));
   const visibleSelectedCount = [...state.selectedExportTurns]
     .filter((key) => visibleKeys.has(key)).length;
-  const selectedTurns = state.completedTurns.filter((turn) => state.selectedExportTurns.has(turn.key));
+  const selectedTurns = [...state.selectedExportTurns]
+    .map((key) => state.selectedExportTurnDetails.get(key))
+    .filter(Boolean);
   const selectedReady = selectedTurns.filter((turn) => turn.export_ready).length;
-  $("#export-selection-count").textContent = `已选 ${selectedCount} 项${selectedCount !== visibleSelectedCount ? `（当前筛选内 ${visibleSelectedCount}）` : ""}`;
+  $("#export-selection-count").textContent = `已选 ${selectedCount} 项${selectedCount !== visibleSelectedCount ? `（当前页 ${visibleSelectedCount}）` : ""}`;
   const download = $("#download-export");
   download.disabled = selectedCount === 0
     || selectedReady !== selectedCount
@@ -1310,7 +1344,7 @@ function updateExportSelectionControls() {
   preflightButton.disabled = state.exportPreflightBusy || state.exportDeleteBusy || visibleTurns.length === 0;
   preflightButton.textContent = state.exportPreflightBusy
     ? "正在检查…"
-    : (selectedCount ? `检查所选轮次（${selectedCount}）` : `检查筛选结果（${visibleTurns.length}）`);
+    : (selectedCount ? `检查所选轮次（${selectedCount}）` : `检查当前页（${visibleTurns.length}）`);
   selectPassedButton.disabled = state.exportPreflightBusy || !state.exportPreflight;
   const selectAll = $("#select-all-export-turns");
   selectAll.checked = visibleTurns.length > 0 && visibleSelectedCount === visibleTurns.length;
@@ -1357,26 +1391,20 @@ async function selectedTurnsPassPreflight(turnKeys) {
 
 function renderExportPage() {
   const list = $("#export-turn-list");
-  if (!state.completedTurns.length) {
-    state.exportPage = 1;
-    renderTablePagination("exports", paginateItems([], state.exportPage));
+  const visibleTurns = filteredCompletedTurns();
+  renderTablePagination("exports", state.exportPagination);
+  if (!state.exportPagination.allTotal) {
     list.innerHTML = '<tr><td colspan="11" class="table-empty">还没有已完成轮次</td></tr>';
     updateExportSelectionControls();
     return;
   }
-  const visibleTurns = filteredCompletedTurns();
   if (!visibleTurns.length) {
-    state.exportPage = 1;
-    renderTablePagination("exports", paginateItems([], state.exportPage));
     list.innerHTML = '<tr><td colspan="11" class="table-empty">没有符合筛选条件的完成轮次</td></tr>';
     updateExportSelectionControls();
     return;
   }
-  const pagination = paginateItems(visibleTurns, state.exportPage);
-  state.exportPage = pagination.page;
-  renderTablePagination("exports", pagination);
   const preflightByKey = exportPreflightByKey();
-  list.innerHTML = pagination.items.map((turn) => {
+  list.innerHTML = visibleTurns.map((turn) => {
     const exportIssues = Array.isArray(turn.export_issues) ? turn.export_issues : [];
     const exportIssueLabels = exportIssues.map((issue) =>
       String(issue).replace(/^缺少\s*/, "").replace(/^评分缺少\s*/, "评分：")
@@ -1732,11 +1760,6 @@ function showListPage() {
 }
 
 async function showDetailPage(id) {
-  if (!state.runs.some((run) => run.id === id)) {
-    showNotice("没有找到这条运行记录");
-    navigateTo("#runs");
-    return;
-  }
   state.selectedId = id;
   recordsView.classList.add("hidden");
   exportView.classList.add("hidden");
@@ -1919,6 +1942,42 @@ async function submitModel(event) {
   } finally {
     button.disabled = false;
     button.textContent = "应用";
+  }
+}
+
+async function updateMaxParallel() {
+  const input = $("#max-parallel-runs");
+  const previous = Number(state.health?.max_parallel || 4);
+  const maxParallel = Number(input.value);
+  if (!Number.isInteger(maxParallel) || maxParallel < 1 || maxParallel > 6) {
+    input.value = String(previous);
+    showNotice("并行上限必须是 1 至 6 的整数");
+    return;
+  }
+  input.disabled = true;
+  try {
+    const result = await api("/api/settings/max-parallel", {
+      method: "POST",
+      body: JSON.stringify({ max_parallel: maxParallel }),
+    });
+    if (state.health) {
+      state.health.max_parallel = result.max_parallel;
+      if (state.health.auto_refill) {
+        state.health.auto_refill.max_parallel = result.max_parallel;
+        state.health.auto_refill.detail = String(state.health.auto_refill.detail || "")
+          .replace(/并行不足\s+\d+\s+时/, `并行不足 ${result.max_parallel} 时`);
+      }
+    }
+    renderHealth();
+    showNotice(
+      `并行上限已改为 ${result.max_parallel}；正在运行的任务不会被中断`,
+      "success",
+    );
+  } catch (error) {
+    input.value = String(previous);
+    showNotice(error.message);
+  } finally {
+    input.disabled = false;
   }
 }
 
@@ -2244,6 +2303,9 @@ async function deleteRun(runId) {
     state.selectedExportTurns = new Set(
       [...state.selectedExportTurns].filter((key) => !key.startsWith(`${runId}:`))
     );
+    [...state.selectedExportTurnDetails.keys()]
+      .filter((key) => key.startsWith(`${runId}:`))
+      .forEach((key) => state.selectedExportTurnDetails.delete(key));
     await loadRuns();
     showNotice(`已隐藏 ${run.repo_name} 的控制台记录；数据、本地项目和 GitHub 仓库仍保留`);
   } catch (error) {
@@ -2253,11 +2315,13 @@ async function deleteRun(runId) {
 
 async function deleteExportTurns(turnKeys) {
   const uniqueKeys = [...new Set(turnKeys)].filter((key) =>
-    state.completedTurns.some((turn) => turn.key === key)
+    state.selectedExportTurnDetails.has(key)
+    || state.completedTurns.some((turn) => turn.key === key)
   );
   if (!uniqueKeys.length || state.exportDeleteBusy) return;
   const turns = uniqueKeys
-    .map((key) => state.completedTurns.find((turn) => turn.key === key))
+    .map((key) => state.selectedExportTurnDetails.get(key)
+      || state.completedTurns.find((turn) => turn.key === key))
     .filter(Boolean);
   const preview = turns.slice(0, 6).map((turn) =>
     `${turn.project_number || "—"} ${turn.repo_name} · 第 ${turn.turn_number} 轮`
@@ -2275,7 +2339,10 @@ async function deleteExportTurns(turnKeys) {
       method: "POST",
       body: JSON.stringify({ turn_keys: uniqueKeys }),
     });
-    uniqueKeys.forEach((key) => state.selectedExportTurns.delete(key));
+    uniqueKeys.forEach((key) => {
+      state.selectedExportTurns.delete(key);
+      state.selectedExportTurnDetails.delete(key);
+    });
     state.exportPreflight = null;
     await loadCompletedTurns();
     showNotice(`已从导出列表隐藏 ${result.changed || 0} 个轮次；代码、轨迹和远端提交均未删除`);
@@ -2327,6 +2394,9 @@ async function downloadSelectedTurns() {
 }
 
 $("#new-run-button").addEventListener("click", startAutomaticRun);
+backToTopButton.addEventListener("click", () => {
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
 $("#open-import-baseline").addEventListener("click", openImportBaselineDialog);
 $("#close-import-baseline").addEventListener("click", closeImportBaselineDialog);
 $("#cancel-import-baseline").addEventListener("click", closeImportBaselineDialog);
@@ -2334,6 +2404,7 @@ $("#import-baseline-form").addEventListener("submit", submitImportedBaseline);
 $("#import-project-directory").addEventListener("change", updateImportBaselinePreview);
 $("#import-project-numbers").addEventListener("input", updateImportBaselinePreview);
 $("#auto-refill-toggle").addEventListener("click", toggleAutoRefill);
+$("#max-parallel-runs").addEventListener("change", updateMaxParallel);
 $("#auto-refill-start-schedule").addEventListener("click", setAutoRefillStartSchedule);
 $("#auto-refill-start-clear").addEventListener("click", clearAutoRefillStartSchedule);
 $("#auto-refill-schedule").addEventListener("click", setAutoRefillSchedule);
@@ -2391,63 +2462,63 @@ $("#run-list").addEventListener("keydown", (event) => {
 $("#run-filter-query").addEventListener("input", (event) => {
   state.filters.query = event.target.value;
   state.runPage = 1;
-  renderRunList();
+  scheduleRunReload();
 });
 $("#run-filter-task-type").addEventListener("change", (event) => {
   state.filters.taskType = event.target.value;
   state.runPage = 1;
-  renderRunList();
+  loadRuns();
 });
 $("#run-filter-category").addEventListener("change", (event) => {
   state.filters.category = event.target.value;
   state.runPage = 1;
-  renderRunList();
+  loadRuns();
 });
 $("#run-filter-status").addEventListener("change", (event) => {
   state.filters.status = event.target.value;
   state.runPage = 1;
-  renderRunList();
+  loadRuns();
 });
 $("#reset-run-filters").addEventListener("click", () => {
   $("#run-filters").reset();
   state.filters = { query: "", taskType: "", category: "", status: "" };
   state.runPage = 1;
-  renderRunList();
+  loadRuns();
 });
 $("#export-filter-query").addEventListener("input", (event) => {
   state.exportFilters.query = event.target.value;
   state.exportPage = 1;
-  renderExportPage();
+  scheduleExportReload();
 });
 $("#export-filter-task-type").addEventListener("change", (event) => {
   state.exportFilters.taskType = event.target.value;
   state.exportPage = 1;
-  renderExportPage();
+  loadCompletedTurns();
 });
 $("#export-filter-difficulty").addEventListener("change", (event) => {
   state.exportFilters.difficulty = event.target.value;
   state.exportPage = 1;
-  renderExportPage();
+  loadCompletedTurns();
 });
 $("#export-filter-readiness").addEventListener("change", (event) => {
   state.exportFilters.readiness = event.target.value;
   state.exportPage = 1;
-  renderExportPage();
+  loadCompletedTurns();
 });
 $("#export-filter-solo-qa").addEventListener("change", (event) => {
   state.exportFilters.soloQaState = event.target.value;
   state.exportPage = 1;
-  renderExportPage();
+  loadCompletedTurns();
 });
 $("#export-filter-date-from").addEventListener("change", (event) => {
   state.exportFilters.dateFrom = event.target.value;
   state.exportPage = 1;
-  renderExportPage();
+  loadCompletedTurns();
 });
 $("#export-filter-date-to").addEventListener("change", (event) => {
   state.exportFilters.dateTo = event.target.value;
   state.exportPage = 1;
-  renderExportPage();
+  loadCompletedTurns();
 });
 $("#reset-export-filters").addEventListener("click", () => {
   $("#export-filters").reset();
@@ -2461,7 +2532,7 @@ $("#reset-export-filters").addEventListener("click", () => {
     dateTo: "",
   };
   state.exportPage = 1;
-  renderExportPage();
+  loadCompletedTurns();
 });
 document.querySelectorAll("[data-table-pagination]").forEach((pagination) => {
   pagination.addEventListener("click", (event) => {
@@ -2471,11 +2542,17 @@ document.querySelectorAll("[data-table-pagination]").forEach((pagination) => {
   });
 });
 $("#select-all-export-turns").addEventListener("change", (event) => {
-  const visibleKeys = filteredCompletedTurns().map((turn) => turn.key);
+  const visibleTurns = filteredCompletedTurns();
   if (event.target.checked) {
-    visibleKeys.forEach((key) => state.selectedExportTurns.add(key));
+    visibleTurns.forEach((turn) => {
+      state.selectedExportTurns.add(turn.key);
+      state.selectedExportTurnDetails.set(turn.key, turn);
+    });
   } else {
-    visibleKeys.forEach((key) => state.selectedExportTurns.delete(key));
+    visibleTurns.forEach((turn) => {
+      state.selectedExportTurns.delete(turn.key);
+      state.selectedExportTurnDetails.delete(turn.key);
+    });
   }
   renderExportPage();
 });
@@ -2486,12 +2563,13 @@ $("#preflight-export").addEventListener("click", () => {
 });
 $("#select-preflight-passed").addEventListener("click", () => {
   const eligible = new Set(state.exportPreflight?.eligible_keys || []);
-  const visible = new Set(filteredCompletedTurns().map((turn) => turn.key));
-  state.selectedExportTurns = new Set(
-    state.completedTurns
-      .filter((turn) => turn.export_ready && eligible.has(turn.key) && visible.has(turn.key))
-      .map((turn) => turn.key)
-  );
+  const knownTurns = new Map(state.selectedExportTurnDetails);
+  filteredCompletedTurns().forEach((turn) => knownTurns.set(turn.key, turn));
+  const passedTurns = [...eligible]
+    .map((key) => knownTurns.get(key))
+    .filter((turn) => turn?.export_ready);
+  state.selectedExportTurns = new Set(passedTurns.map((turn) => turn.key));
+  state.selectedExportTurnDetails = new Map(passedTurns.map((turn) => [turn.key, turn]));
   renderExportPage();
   showNotice(`已选择 ${state.selectedExportTurns.size} 个检查通过轮次`);
 });
@@ -2503,8 +2581,14 @@ $("#export-turn-list").addEventListener("change", (event) => {
   }
   const checkbox = event.target.closest("[data-export-key]");
   if (!checkbox) return;
-  if (checkbox.checked) state.selectedExportTurns.add(checkbox.dataset.exportKey);
-  else state.selectedExportTurns.delete(checkbox.dataset.exportKey);
+  if (checkbox.checked) {
+    const turn = state.completedTurns.find((item) => item.key === checkbox.dataset.exportKey);
+    state.selectedExportTurns.add(checkbox.dataset.exportKey);
+    if (turn) state.selectedExportTurnDetails.set(turn.key, turn);
+  } else {
+    state.selectedExportTurns.delete(checkbox.dataset.exportKey);
+    state.selectedExportTurnDetails.delete(checkbox.dataset.exportKey);
+  }
   updateExportSelectionControls();
 });
 $("#export-turn-list").addEventListener("input", (event) => {
@@ -2548,7 +2632,7 @@ document.querySelectorAll("[data-sort-key]").forEach((button) => {
       state.sortDirection = "desc";
     }
     state.runPage = 1;
-    renderRunList();
+    loadRuns();
   });
 });
 detailView.addEventListener("pointerdown", () => {
@@ -2589,4 +2673,6 @@ async function boot() {
 }
 
 window.addEventListener("hashchange", applyRoute);
+window.addEventListener("scroll", scheduleBackToTopVisibility, { passive: true });
+updateBackToTopVisibility();
 boot();

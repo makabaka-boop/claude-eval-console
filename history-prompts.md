@@ -1172,3 +1172,48 @@
 <!-- prompt-end -->
 <!-- task-entry-end -->
 
+<!-- task-entry-start {"run_id": "96ccc512db50", "repo_name": "evacuation-band-gate-attribution", "task_type": "0-1 代码生成", "project_category": "纯后端", "language_framework": "Python 3.12, FastAPI, Pydantic, SQLAlchemy, PostgreSQL, pytest, Docker, Docker Compose", "summary": "火警疏散时，同一腕带可能被相邻闸机几乎同时扫到；若两个入口都计为首次通过，分区清点会虚增人数。 … Docker Compose 运行 API，宿主端口可由 API_PORT 覆盖，并提供名为 verify 的一次性验收服务；验收须使用 PostgreSQL 真实并发事务，证明清点方对同一腕带最终只"} -->
+## 0067 · evacuation-band-gate-attribution
+
+- 创建时间：2026-09-14 20:24:58 +0800
+- 项目类别：纯后端
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, SQLAlchemy, PostgreSQL, pytest, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+火警疏散时，同一腕带可能被相邻闸机几乎同时扫到；若两个入口都计为首次通过，分区清点会虚增人数。请从空仓库起步，使用 Python 3.12、FastAPI、Pydantic、SQLAlchemy、PostgreSQL 和 pytest 实现纯后端 API。扫描请求为包含 event_id、band_id、gate_id 与带时区 scanned_at 的 JSON；腕带第一笔成功提交的事务永久确定其首次闸机和时间，不按客户端时间倒排。数据库唯一约束与事务须保证跨请求、跨进程并发时恰有一个请求返回 first_seen，另一请求返回 already_seen 并携带同一归属；按 band_id 查询也须返回该唯一事实。以 event_id 和完整载荷实现持久化幂等：完全相同的重放返回原响应且不新增记录，同一 event_id 的不同载荷返回 409 且不改变归属。服务重启后，胜出事件的重放响应和查询结果仍须一致。Docker Compose 运行 API，宿主端口可由 API_PORT 覆盖，并提供名为 verify 的一次性验收服务；验收须使用 PostgreSQL 真实并发事务，证明清点方对同一腕带最终只增加一人。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "7fe7dcc0b1a3", "repo_name": "oral-history-clipping-locator", "task_type": "0-1 代码生成", "project_category": "纯前端", "language_framework": "TypeScript, React, Vite, Web Audio API, Canvas 2D API, Vitest, Playwright, Docker, Docker Compose", "summary": "口述史磁带数字化后，短促削波常藏在长录音中，质检员需要分别核对各声道。 … 使用 Docker Compose 运行 web，宿主端口可由 WEB_PORT 覆盖，并提供名为 verify 的一次性验收服务。"} -->
+## 0068 · oral-history-clipping-locator
+
+- 创建时间：2026-09-14 20:47:34 +0800
+- 项目类别：纯前端
+- 任务难度：待评估
+- 语言/框架：TypeScript, React, Vite, Web Audio API, Canvas 2D API, Vitest, Playwright, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+口述史磁带数字化后，短促削波常藏在长录音中，质检员需要分别核对各声道。请从空仓库起步，使用 TypeScript、React、Vite、Web Audio API 与 Canvas 2D API 实现纯浏览器核验台，只读取用户本地单个 WAV，不上传文件或访问在线服务，禁止占位实现。按声道扫描解码后的归一化 PCM：绝对值大于等于 0.999 且连续至少 3 帧才形成削波段，相邻段间隔不超过 2 帧必须合并，间隔 3 帧及以上不得合并；起止时间分别为首帧和末帧后一帧除以采样率，毫秒显示取最接近整数，恰为 0.5 时向上取整。页面展示各声道波形、削波高亮、区间列表、点击定位和总削波时长；总时长按各声道区间时长累加，同一时刻多声道削波分别计入。任一声道存在区间即显示“需重采”，否则显示“可交付”；双声道样例只能高亮实际削波声道，并可定位到首个异常时刻。损坏、无音轨或扫描失败须显示明确原因且不生成结果。Vitest 覆盖阈值、连续帧、合并和换算边界，Playwright 覆盖载入、定位、结论与失败提示。使用 Docker Compose 运行 web，宿主端口可由 WEB_PORT 覆盖，并提供名为 verify 的一次性验收服务。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "86bc3d1ce920", "repo_name": "sheet-bend-flat-pattern", "task_type": "0-1 代码生成", "project_category": "全栈", "language_framework": "Docker, Python 3.12, FastAPI, Pydantic, Decimal, TypeScript, React, Vite, pytest, Vitest", "summary": "折弯机开料前，图纸成品直段不能直接相加作为下料长度，折弯参数若由不同人员分别处理，会使同一零件得到不同尺寸。 … Docker Compose 启动 Web 与 API，WEB_PORT、API_PORT 可覆盖宿主端口，并提供名为 vinfy"} -->
+## 0069 · sheet-bend-flat-pattern
+
+- 创建时间：2026-09-14 21:09:20 +0800
+- 项目类别：全栈
+- 任务难度：待评估
+- 语言/框架：Docker, Python 3.12, FastAPI, Pydantic, Decimal, TypeScript, React, Vite, pytest, Vitest
+
+### User Prompt
+
+<!-- prompt-start -->
+折弯机开料前，图纸成品直段不能直接相加作为下料长度，折弯参数若由不同人员分别处理，会使同一零件得到不同尺寸。请从空仓库起步，使用 Python 3.12、FastAPI、Pydantic、Decimal、TypeScript、React 与 Vite 实现真实联调的展开复核台，供折弯机备料复核员使用；README 在公式旁解释输入含义，.gitignore 排除本地构建产物，禁止固定响应或占位实现。用户按加工顺序输入 n 道折弯及 n+1 个切点间直段，明确 n≥1、每段长度>0，单位均为毫米；每道须满足 0<角度<180、板厚>0、内半径≥0、0≤K因子≤0.5，所有数值必须有限。每道补偿量固定为 π÷180×角度×（内半径+K因子×板厚），未舍入总长为全部直段与补偿量之和；使用 Decimal 计算，明细保留六位，仅最终下料长度按 ROUND_HALF_UP 保留两位。数量不匹配、折弯数为零、直段非正、非有限数或参数越界时，API 返回字段级错误，页面不得用非法提交替换上一份有效结果；合法请求显示逐道代入值、未舍入总长和唯一的下料长度。pytest 覆盖计算与边界，Vitest 覆盖表单交互，Playwright 覆盖合法计算及非法提交后的结果保留。Docker Compose 启动 Web 与 API，WEB_PORT、API_PORT 可覆盖宿主端口，并提供名为 vinfy
+<!-- prompt-end -->
+<!-- task-entry-end -->
+

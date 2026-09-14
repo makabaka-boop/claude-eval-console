@@ -98,6 +98,8 @@ TERMINAL_ATTENTION_SOUND_PATH = Path(
 ).expanduser()
 MAX_TURNS = 10
 MAX_EXPORT_TURNS = 500
+LIST_PAGE_SIZE = 20
+LIST_MAX_PAGE_SIZE = 100
 STANDARD_PROJECT_NUMBER_MIN = 1
 STANDARD_PROJECT_NUMBER_MAX = 2999
 IMPORTED_PROJECT_NUMBER_MIN = 3000
@@ -130,7 +132,7 @@ SOLO_QA_PROJECT_REJECTION_MARKERS = (
     "题材不合格",
 )
 SUBMITTER_NAME = os.environ.get("CLAUDE_EVAL_SUBMITTER", "张鑫宇").strip() or "张鑫宇"
-APP_VERSION = "20260914.3"
+APP_VERSION = "20260914.7"
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$")
 BACKGROUND_ID_RE = re.compile(r"backgrounded\s+[·•]\s+([A-Za-z0-9_-]+)", re.I)
@@ -163,10 +165,18 @@ BUILTIN_MODEL_OPTIONS = [
     ("sonnet[1m]", "Sonnet 5（1M 上下文）"),
     ("haiku", "Haiku"),
 ]
+MIN_PARALLEL_RUNS = 1
+MAX_PARALLEL_RUNS_LIMIT = 6
 try:
-    MAX_PARALLEL_RUNS = max(1, min(4, int(os.environ.get("CLAUDE_EVAL_MAX_PARALLEL", "4"))))
+    DEFAULT_MAX_PARALLEL_RUNS = max(
+        MIN_PARALLEL_RUNS,
+        min(
+            MAX_PARALLEL_RUNS_LIMIT,
+            int(os.environ.get("CLAUDE_EVAL_MAX_PARALLEL", "4")),
+        ),
+    )
 except ValueError:
-    MAX_PARALLEL_RUNS = 4
+    DEFAULT_MAX_PARALLEL_RUNS = 4
 REVIEW_MODEL = "gpt-5.6-sol"
 TASK_GENERATION_MODEL = REVIEW_MODEL
 TASK_GENERATION_BATCH_SIZE = 2
@@ -658,7 +668,9 @@ FORBIDDEN_TASK_TERMS = (
     "旅行日记", "观影记录",
     "待办清单", "待办事项", "任务清单", "待办应用", "todo", "to-do",
 )
-WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_PARALLEL_RUNS)
+WORKER_SEMAPHORE = threading.BoundedSemaphore(MAX_PARALLEL_RUNS_LIMIT)
+WORKER_SLOT_CONDITION = threading.Condition()
+WORKER_SLOT_ACTIVE = 0
 PATH_ALLOCATION_LOCK = threading.RLock()
 PROJECT_NUMBER_RESERVATIONS: set[Tuple[str, int]] = set()
 STATUS_CACHE_LOCK = threading.Lock()
@@ -1268,6 +1280,10 @@ def initialize_database() -> None:
         database.execute(
             "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES ('auto_refill_consecutive_failures', '0', ?)",
             (now_text(),),
+        )
+        database.execute(
+            "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES ('max_parallel_runs', ?, ?)",
+            (str(DEFAULT_MAX_PARALLEL_RUNS), now_text()),
         )
         harness_version = detect_harness_version()
         if harness_version:
@@ -2781,7 +2797,63 @@ def write_settings(values: Dict[str, str]) -> None:
         )
 
 
+def configured_max_parallel_runs() -> int:
+    try:
+        raw_value = settings_values(("max_parallel_runs",)).get(
+            "max_parallel_runs", str(DEFAULT_MAX_PARALLEL_RUNS)
+        )
+        value = int(raw_value)
+    except (OSError, TypeError, ValueError, sqlite3.Error):
+        return DEFAULT_MAX_PARALLEL_RUNS
+    return max(MIN_PARALLEL_RUNS, min(MAX_PARALLEL_RUNS_LIMIT, value))
+
+
+def set_max_parallel_runs(payload: Dict[str, Any]) -> Dict[str, int]:
+    value = payload.get("max_parallel")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise WorkflowError("并行上限必须是 1 至 6 的整数")
+    if not MIN_PARALLEL_RUNS <= value <= MAX_PARALLEL_RUNS_LIMIT:
+        raise WorkflowError("并行上限必须是 1 至 6 的整数")
+    current_detail = settings_values(("auto_refill_detail",)).get(
+        "auto_refill_detail", ""
+    )
+    updated_detail = re.sub(
+        r"并行不足\s+\d+\s+时",
+        f"并行不足 {value} 时",
+        current_detail,
+    )
+    settings = {"max_parallel_runs": str(value)}
+    if updated_detail != current_detail:
+        settings["auto_refill_detail"] = updated_detail
+    write_settings(settings)
+    with WORKER_SLOT_CONDITION:
+        WORKER_SLOT_CONDITION.notify_all()
+    AUTO_REFILL_WAKE.set()
+    return {
+        "max_parallel": value,
+        "max_allowed": MAX_PARALLEL_RUNS_LIMIT,
+    }
+
+
+@contextmanager
+def worker_slot() -> Iterator[None]:
+    """Apply the persisted runtime limit without interrupting active work."""
+    global WORKER_SLOT_ACTIVE
+    with WORKER_SEMAPHORE:
+        with WORKER_SLOT_CONDITION:
+            while WORKER_SLOT_ACTIVE >= configured_max_parallel_runs():
+                WORKER_SLOT_CONDITION.wait(timeout=1)
+            WORKER_SLOT_ACTIVE += 1
+        try:
+            yield
+        finally:
+            with WORKER_SLOT_CONDITION:
+                WORKER_SLOT_ACTIVE = max(0, WORKER_SLOT_ACTIVE - 1)
+                WORKER_SLOT_CONDITION.notify_all()
+
+
 def auto_refill_configuration() -> Dict[str, Any]:
+    max_parallel = configured_max_parallel_runs()
     values = settings_values(
         (
             "auto_refill_enabled",
@@ -2814,7 +2886,7 @@ def auto_refill_configuration() -> Dict[str, Any]:
         )
         detail = (
             f"自动补题已于 {opened_at} 按计划开启："
-            f"并行不足 {MAX_PARALLEL_RUNS} 时自动补位"
+            f"并行不足 {max_parallel} 时自动补位"
         )
         write_settings(
             {
@@ -2871,7 +2943,7 @@ def auto_refill_configuration() -> Dict[str, Any]:
     return {
         "enabled": enabled,
         "project_directory": project_directory,
-        "max_parallel": MAX_PARALLEL_RUNS,
+        "max_parallel": max_parallel,
         "max_iterations_per_root": AUTO_REFILL_MAX_ITERATIONS_PER_ROOT,
         "max_new_modules_per_root": MAX_NEW_MODULE_ITERATIONS_PER_ROOT,
         "new_module_slots": list(AUTO_REFILL_NEW_MODULE_SLOTS),
@@ -2931,6 +3003,7 @@ def set_auto_refill(payload: Dict[str, Any]) -> Dict[str, Any]:
             if not 0.5 <= disable_after_hours <= 168:
                 raise WorkflowError("自动关闭时长必须是 0.5 至 168 小时")
             disable_at_epoch = int(time.time() + disable_after_hours * 60 * 60)
+    max_parallel = configured_max_parallel_runs()
     if enable_at_epoch is not None:
         open_text = datetime.fromtimestamp(enable_at_epoch).astimezone().strftime(
             "%Y-%m-%d %H:%M"
@@ -2941,11 +3014,11 @@ def set_auto_refill(payload: Dict[str, Any]) -> Dict[str, Any]:
             "%Y-%m-%d %H:%M"
         )
         detail = (
-            f"自动补题已开启：并行不足 {MAX_PARALLEL_RUNS} 时自动补位，"
+            f"自动补题已开启：并行不足 {max_parallel} 时自动补位，"
             f"将于 {close_text} 自动关闭"
         )
     elif enabled:
-        detail = f"自动补题已开启：并行不足 {MAX_PARALLEL_RUNS} 时自动补位"
+        detail = f"自动补题已开启：并行不足 {max_parallel} 时自动补位"
     else:
         detail = "自动补题已关闭；已启动的任务继续运行"
     settings = {
@@ -5013,7 +5086,7 @@ def generate_iteration_candidate(
         raise WorkflowError("当前任务缺少可迭代的 Git 快照或首轮记录")
     context = iteration_project_context(row)
     feedback = initial_feedback.strip()
-    with WORKER_SEMAPHORE:
+    with worker_slot():
         for attempt in range(1, ITERATION_GENERATION_ATTEMPTS + 1):
             ensure_job_active()
             update_current_iteration_job_stage(
@@ -5421,8 +5494,9 @@ def queue_automatic_iteration(
             "created_run_id": existing["id"],
             "task_type": existing["task_type"],
         }
-    if automatic_refill_occupancy() >= MAX_PARALLEL_RUNS:
-        raise WorkflowError(f"当前并行任务已达到 {MAX_PARALLEL_RUNS} 个，请等待空闲槽")
+    max_parallel = configured_max_parallel_runs()
+    if automatic_refill_occupancy() >= max_parallel:
+        raise WorkflowError(f"当前并行任务已达到 {max_parallel} 个，请等待空闲槽")
     validate_iteration_lineage_type(source_run_id, target_task_type)
     row = run_row(source_run_id)
     # Resolve the lineage below before accepting the workspace; stopped runs
@@ -5632,7 +5706,8 @@ def automatic_refill_once() -> Dict[str, Any]:
         if not configuration["enabled"]:
             return {"action": "disabled"}
         occupancy = automatic_refill_occupancy()
-        if occupancy >= MAX_PARALLEL_RUNS:
+        max_parallel = configured_max_parallel_runs()
+        if occupancy >= max_parallel:
             return {"action": "full", "occupancy": occupancy}
 
         source = auto_refill_iteration_candidate()
@@ -5709,7 +5784,7 @@ def automatic_refill_loop() -> None:
         AUTO_REFILL_WAKE.wait(AUTO_REFILL_POLL_SECONDS)
         AUTO_REFILL_WAKE.clear()
         try:
-            for _ in range(MAX_PARALLEL_RUNS):
+            for _ in range(configured_max_parallel_runs()):
                 result = automatic_refill_once()
                 if result.get("action") not in {"iteration", "0-1"}:
                     break
@@ -6524,7 +6599,7 @@ def all_runs() -> List[Dict[str, Any]]:
     with db_connection() as database:
         rows = database.execute(
             """SELECT id, repo_name, model, second_model, task_type, project_category, task_difficulty, language_framework,
-                      repo_path, source_run_id, phase, second_prompt, second_prompt_id, second_agent_id, created_at, updated_at,
+                      repo_path, source_run_id, phase, status_detail, second_prompt, second_prompt_id, second_agent_id, created_at, updated_at,
                       imported_baseline,
                       (SELECT COALESCE(MAX(turn_number), CASE WHEN runs.imported_baseline = 1 THEN 0 ELSE 1 END)
                        FROM run_turns WHERE run_id = runs.id) AS turn_count,
@@ -6540,6 +6615,157 @@ def all_runs() -> List[Dict[str, Any]]:
         record.update(conversation_turn(record))
         records.append(record)
     return records
+
+
+RUN_LIST_ACTIVE_PHASES = {
+    "generation_queued",
+    "generation_running",
+    "queued",
+    "first_retry_queued",
+    "creating_repo",
+    "first_starting",
+    "first_running",
+    "first_idle",
+    "review_queued",
+    "review_running",
+    "awaiting_second",
+    "second_queued",
+    "second_starting",
+    "second_running",
+    "second_idle",
+    "final_review_queued",
+    "final_review_running",
+}
+
+
+def list_query_value(query: Dict[str, List[str]], key: str) -> str:
+    values = query.get(key) or []
+    return str(values[0] if values else "").strip()
+
+
+def list_page_parameters(query: Dict[str, List[str]]) -> Tuple[int, int]:
+    try:
+        page = int(list_query_value(query, "page") or 1)
+        page_size = int(list_query_value(query, "page_size") or LIST_PAGE_SIZE)
+    except ValueError as exc:
+        raise WorkflowError("分页参数必须是整数") from exc
+    if page < 1:
+        raise WorkflowError("页码必须大于零")
+    if page_size < 1 or page_size > LIST_MAX_PAGE_SIZE:
+        raise WorkflowError(f"每页条数必须在 1 至 {LIST_MAX_PAGE_SIZE} 之间")
+    return page, page_size
+
+
+def list_page_payload(
+    items: List[Dict[str, Any]],
+    requested_page: int,
+    page_size: int,
+    *,
+    all_total: Optional[int] = None,
+) -> Dict[str, Any]:
+    total = len(items)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(requested_page, total_pages)
+    start = (page - 1) * page_size
+    return {
+        "items": items[start : start + page_size],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "all_total": total if all_total is None else int(all_total),
+        "total_pages": total_pages,
+        "start_item": start + 1 if total else 0,
+        "end_item": min(total, start + page_size),
+    }
+
+
+def run_list_matches(record: Dict[str, Any], query: Dict[str, List[str]]) -> bool:
+    keyword = list_query_value(query, "query").casefold()
+    task_type = list_query_value(query, "task_type")
+    category = list_query_value(query, "category")
+    status = list_query_value(query, "status")
+    current_task_type = str(
+        record.get("current_task_type") or record.get("task_type") or "未记录"
+    )
+    if keyword:
+        haystack = " ".join(
+            str(record.get(key) or "")
+            for key in (
+                "project_number",
+                "repo_name",
+                "id",
+                "project_category",
+                "language_framework",
+                "current_model",
+                "model",
+            )
+        )
+        haystack = f"{haystack} {current_task_type}".casefold()
+        if keyword not in haystack:
+            return False
+    if task_type and current_task_type != task_type:
+        return False
+    if category and str(record.get("project_category") or "") != category:
+        return False
+    phase = str(record.get("phase") or "")
+    needs_attention = "等待人工确认" in str(record.get("status_detail") or "")
+    if status == "active" and phase not in RUN_LIST_ACTIVE_PHASES:
+        return False
+    if status == "complete" and phase != "complete":
+        return False
+    if status == "attention" and not (
+        needs_attention
+        or phase in {"turn_limit", "manual_review", "interrupted", "failed", "stopped"}
+    ):
+        return False
+    return status in {"", "active", "complete", "attention"}
+
+
+def run_project_sort_value(value: Any) -> Tuple[int, int, str]:
+    text = str(value or "")
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?", text)
+    if not match:
+        return (-1, -1, text)
+    return (int(match.group(1)), int(match.group(2) or 0), text)
+
+
+def paginated_runs(query: Dict[str, List[str]]) -> Dict[str, Any]:
+    page, page_size = list_page_parameters(query)
+    records = all_runs()
+    filtered = [record for record in records if run_list_matches(record, query)]
+    sort_key = list_query_value(query, "sort") or "updated_at"
+    if sort_key not in {"project_number", "current_turn", "created_at", "updated_at"}:
+        raise WorkflowError("任务列表排序字段不正确")
+    direction = list_query_value(query, "direction") or "desc"
+    if direction not in {"asc", "desc"}:
+        raise WorkflowError("任务列表排序方向不正确")
+
+    def value(record: Dict[str, Any]) -> Any:
+        if sort_key == "project_number":
+            return run_project_sort_value(record.get(sort_key))
+        if sort_key == "current_turn":
+            return (int(record.get(sort_key) or 0), str(record.get("id") or ""))
+        return (str(record.get(sort_key) or ""), str(record.get("id") or ""))
+
+    filtered.sort(key=value, reverse=direction == "desc")
+    payload = list_page_payload(
+        filtered,
+        page,
+        page_size,
+        all_total=len(records),
+    )
+    page_ids = {str(record.get("id") or "") for record in payload["items"]}
+    payload["active_items"] = [
+        record
+        for record in filtered
+        if str(record.get("phase") or "") in RUN_LIST_ACTIVE_PHASES
+        and str(record.get("id") or "") not in page_ids
+    ]
+    payload["has_generation_job"] = any(
+        str(record.get("phase") or "") in {"generation_queued", "generation_running"}
+        for record in records
+    )
+    return payload
 
 
 def active_background_generation_rows() -> List[Dict[str, Any]]:
@@ -7662,57 +7888,172 @@ def sync_solo_qa_submissions(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def completed_turns() -> List[Dict[str, Any]]:
-    records: List[Dict[str, Any]] = []
-    for row in completed_turn_rows():
-        evaluation = turn_evaluation(row)
-        candidate = candidate_turn_evaluation(row)
-        turn_number = int(row["turn_number"])
-        fallback_difficulty = (
-            row.get("run_task_difficulty") if int(row.get("turn_count") or 0) == 1 else ""
-        )
-        export_ready, export_issues = export_readiness(row)
-        solo_qa_ready, solo_qa_issues = solo_qa_readiness(
-            row, export_ready, export_issues
-        )
-        _, similarity_warnings = evaluation_history_similarity_issues(
-            evaluation,
-            (str(row.get("run_id") or ""), turn_number),
-        ) if evaluation else ([], [])
-        records.append({
-            "key": f"{row['run_id']}:{turn_number}",
-            "run_id": row["run_id"],
-            "session_id": row.get("session_id") or "",
-            "project_number": run_project_number_label(row),
-            "repo_name": row["repo_name"],
-            "turn_number": turn_number,
-            "prompt": row.get("turn_prompt") or "",
-            "task_type": completed_turn_task_type(row, evaluation) or "未记录",
-            "task_difficulty": evaluation.get("task_difficulty")
-            or candidate.get("task_difficulty")
-            or fallback_difficulty
-            or "未记录",
-            "model": row.get("turn_model") or "未记录",
-            "completed_at": row.get("turn_updated_at") or "",
-            "evaluation": evaluation or None,
-            "evaluation_candidate": candidate or None,
-            "evaluation_status": (
-                "manual"
-                if turn_manual_evaluation(row)
-                else str(row.get("turn_evaluation_status") or "legacy")
+def completed_turn_summary(row: Dict[str, Any]) -> Dict[str, Any]:
+    evaluation = turn_evaluation(row)
+    candidate = candidate_turn_evaluation(row)
+    manual = turn_manual_evaluation(row)
+    turn_number = int(row["turn_number"])
+    fallback_difficulty = (
+        row.get("run_task_difficulty") if int(row.get("turn_count") or 0) == 1 else ""
+    )
+    export_ready, export_issues = export_readiness(row)
+    solo_qa_ready, solo_qa_issues = solo_qa_readiness(
+        row, export_ready, export_issues
+    )
+    _, similarity_warnings = evaluation_history_similarity_issues(
+        evaluation,
+        (str(row.get("run_id") or ""), turn_number),
+    ) if evaluation else ([], [])
+    return {
+        "key": f"{row['run_id']}:{turn_number}",
+        "run_id": row["run_id"],
+        "session_id": row.get("session_id") or "",
+        "project_number": run_project_number_label(row),
+        "repo_name": row["repo_name"],
+        "turn_number": turn_number,
+        "prompt": row.get("turn_prompt") or "",
+        "task_type": completed_turn_task_type(row, evaluation) or "未记录",
+        "task_difficulty": evaluation.get("task_difficulty")
+        or candidate.get("task_difficulty")
+        or fallback_difficulty
+        or "未记录",
+        "model": row.get("turn_model") or "未记录",
+        "completed_at": row.get("turn_updated_at") or "",
+        "evaluation": evaluation or None,
+        "evaluation_candidate": candidate or None,
+        "evaluation_status": (
+            "manual" if manual else str(row.get("turn_evaluation_status") or "legacy")
+        ),
+        "evaluation_warning": row.get("turn_evaluation_warning") or "",
+        "evaluation_validated_at": row.get("turn_evaluation_validated_at") or "",
+        "evaluation_overridden": bool(manual),
+        "evaluation_override_updated_at": row.get("turn_manual_evaluation_updated_at") or "",
+        "evaluation_similarity_warnings": similarity_warnings,
+        "export_ready": export_ready,
+        "export_issues": export_issues,
+        "solo_qa_ready": solo_qa_ready,
+        "solo_qa_issues": solo_qa_issues,
+        "solo_qa": solo_qa_state_summary(row, solo_qa_ready),
+    }
+
+
+def completed_turn_filter_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
+    evaluation = turn_evaluation(row)
+    candidate = candidate_turn_evaluation(row)
+    fallback_difficulty = (
+        row.get("run_task_difficulty") if int(row.get("turn_count") or 0) == 1 else ""
+    )
+    return {
+        "key": f"{row['run_id']}:{int(row['turn_number'])}",
+        "project_number": run_project_number_label(row),
+        "repo_name": str(row.get("repo_name") or ""),
+        "run_id": str(row.get("run_id") or ""),
+        "task_type": completed_turn_task_type(row, evaluation) or "未记录",
+        "task_difficulty": evaluation.get("task_difficulty")
+        or candidate.get("task_difficulty")
+        or fallback_difficulty
+        or "未记录",
+        "completed_at": str(row.get("turn_updated_at") or ""),
+    }
+
+
+def completed_turn_solo_filter_state(record: Dict[str, Any]) -> str:
+    solo = record.get("solo_qa") or {}
+    if solo.get("remote_id"):
+        return str(solo.get("state") or "qc_pending")
+    return str(solo.get("state") or "not_submitted") if record.get(
+        "solo_qa_ready"
+    ) else "not_ready"
+
+
+def completed_turns_page(query: Dict[str, List[str]]) -> Dict[str, Any]:
+    page, page_size = list_page_parameters(query)
+    rows = completed_turn_rows()
+    keyword = list_query_value(query, "query").casefold()
+    task_type = list_query_value(query, "task_type")
+    difficulty = list_query_value(query, "difficulty")
+    readiness = list_query_value(query, "readiness")
+    solo_state = list_query_value(query, "solo_qa_state")
+    date_from = list_query_value(query, "date_from")
+    date_to = list_query_value(query, "date_to")
+    if readiness not in {"", "ready", "blocked"}:
+        raise WorkflowError("导出资料状态筛选值不正确")
+    if date_from and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_from):
+        raise WorkflowError("开始日期格式不正确")
+    if date_to and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_to):
+        raise WorkflowError("结束日期格式不正确")
+
+    matched: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = []
+    for row in rows:
+        metadata = completed_turn_filter_metadata(row)
+        if keyword:
+            haystack = " ".join(
+                str(metadata.get(key) or "")
+                for key in ("project_number", "repo_name", "run_id", "task_type")
+            ).casefold()
+            if keyword not in haystack:
+                continue
+        if task_type and metadata["task_type"] != task_type:
+            continue
+        if difficulty and metadata["task_difficulty"] != difficulty:
+            continue
+        completed_date = metadata["completed_at"][:10]
+        if date_from and completed_date < date_from:
+            continue
+        if date_to and completed_date > date_to:
+            continue
+        detailed: Optional[Dict[str, Any]] = None
+        if readiness or solo_state:
+            detailed = completed_turn_summary(row)
+            if readiness == "ready" and not detailed["export_ready"]:
+                continue
+            if readiness == "blocked" and detailed["export_ready"]:
+                continue
+            if solo_state and completed_turn_solo_filter_state(detailed) != solo_state:
+                continue
+        matched.append((row, detailed))
+
+    total = len(matched)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, total_pages)
+    start = (page - 1) * page_size
+    selected = matched[start : start + page_size]
+    items = [detailed or completed_turn_summary(row) for row, detailed in selected]
+    conversations: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        conversation = str(row.get("session_id") or row.get("run_id") or "")
+        conversations.setdefault(conversation, []).append(row)
+    for item in items:
+        conversation = str(item.get("session_id") or item.get("run_id") or "")
+        earlier = sorted(
+            (
+                row
+                for row in conversations.get(conversation, [])
+                if int(row.get("turn_number") or 0) < int(item.get("turn_number") or 0)
+                and not str(row.get("solo_qa_remote_submission_id") or "")
             ),
-            "evaluation_warning": row.get("turn_evaluation_warning") or "",
-            "evaluation_validated_at": row.get("turn_evaluation_validated_at") or "",
-            "evaluation_overridden": bool(turn_manual_evaluation(row)),
-            "evaluation_override_updated_at": row.get("turn_manual_evaluation_updated_at") or "",
-            "evaluation_similarity_warnings": similarity_warnings,
-            "export_ready": export_ready,
-            "export_issues": export_issues,
-            "solo_qa_ready": solo_qa_ready,
-            "solo_qa_issues": solo_qa_issues,
-            "solo_qa": solo_qa_state_summary(row, solo_qa_ready),
-        })
-    return records
+            key=lambda row: int(row.get("turn_number") or 0),
+        )
+        if earlier:
+            predecessor = earlier[0]
+            item["unsubmitted_predecessor"] = {
+                "key": f"{predecessor['run_id']}:{int(predecessor['turn_number'])}",
+                "turn_number": int(predecessor["turn_number"]),
+            }
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "all_total": len(rows),
+        "total_pages": total_pages,
+        "start_item": start + 1 if total else 0,
+        "end_item": min(total, start + page_size),
+    }
+
+
+def completed_turns() -> List[Dict[str, Any]]:
+    return [completed_turn_summary(row) for row in completed_turn_rows()]
 
 
 def hourly_output_analytics(requested_date: Optional[str] = None) -> Dict[str, Any]:
@@ -12670,7 +13011,7 @@ def schedule_worker(run_id: str, queued_phase: str, worker: Any) -> None:
     clear_job_cancellation(job_key)
 
     def guarded() -> None:
-        with WORKER_SEMAPHORE:
+        with worker_slot():
             try:
                 if run_row(run_id)["phase"] != queued_phase:
                     return
@@ -13556,7 +13897,7 @@ def dependency_status() -> Dict[str, Any]:
         "model_options": available_model_options(),
         "default_project_directory": resolve_project_directory(DEFAULT_PROJECT_DIRECTORY)[0],
         "project_directories": available_project_directories(),
-        "max_parallel": MAX_PARALLEL_RUNS,
+        "max_parallel": configured_max_parallel_runs(),
         "max_turns": MAX_TURNS,
         "active_jobs": active_jobs,
         "queued_jobs": queued_jobs,
@@ -13669,7 +14010,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_json(dependency_status())
                 return
             if path == "/api/runs":
-                self.send_json(all_runs())
+                self.send_json(paginated_runs(parse_qs(parsed.query)))
                 return
             if path == "/api/runs/background-jobs":
                 self.send_json(active_background_generation_rows())
@@ -13685,7 +14026,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_json(hourly_output_analytics(requested_date))
                 return
             if path == "/api/exports/turns":
-                self.send_json(completed_turns())
+                self.send_json(completed_turns_page(parse_qs(parsed.query)))
                 return
             if path == "/api/solo-qa/turns":
                 self.send_json(completed_turns())
@@ -13759,6 +14100,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/settings/auto-refill":
                 self.send_json(set_auto_refill(payload))
+                return
+            if path == "/api/settings/max-parallel":
+                self.send_json(set_max_parallel_runs(payload))
                 return
             if path == "/api/exports/preflight":
                 self.send_json(preflight_completed_turns(payload.get("turn_keys")))
@@ -14097,7 +14441,7 @@ def _recover_monitor(run_id: str, turn: int) -> None:
 
 def schedule_recovered_monitor(run_id: str, turn: int) -> None:
     def guarded() -> None:
-        with WORKER_SEMAPHORE:
+        with worker_slot():
             _recover_monitor(run_id, turn)
 
     threading.Thread(target=guarded, daemon=True).start()
@@ -14105,7 +14449,7 @@ def schedule_recovered_monitor(run_id: str, turn: int) -> None:
 
 def schedule_recovered_action(run_id: str, action: Any) -> None:
     def guarded() -> None:
-        with WORKER_SEMAPHORE:
+        with worker_slot():
             try:
                 add_event(run_id, "控制台重启，正在恢复容器流程", "warning")
                 action(run_id)
@@ -14123,7 +14467,7 @@ def schedule_legacy_recovered_monitor(
     session_id: str,
 ) -> None:
     def guarded() -> None:
-        with WORKER_SEMAPHORE:
+        with worker_slot():
             try:
                 monitor_claude(run_id, turn, agent_id, session_id)
             except Exception as exc:

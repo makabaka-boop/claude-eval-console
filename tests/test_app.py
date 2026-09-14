@@ -1229,15 +1229,32 @@ B-5 公共长片段（套模板）
         styles = (app.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
 
         self.assertIn("const TABLE_PAGE_SIZE = 20", javascript)
+        self.assertEqual(app.LIST_PAGE_SIZE, 20)
         self.assertEqual(html.count('data-table-pagination="runs"'), 2)
         self.assertEqual(html.count('data-table-pagination="exports"'), 2)
-        self.assertIn("function paginateItems", javascript)
-        self.assertIn("pagination.items.map((run)", javascript)
-        self.assertIn("pagination.items.map((turn)", javascript)
+        self.assertIn("function paginationFromResponse", javascript)
+        self.assertIn("api(`/api/runs${query}`)", javascript)
+        self.assertIn("api(`/api/exports/turns${query}`)", javascript)
+        self.assertIn('renderTablePagination("runs", state.runPagination)', javascript)
+        self.assertIn('renderTablePagination("exports", state.exportPagination)', javascript)
+        self.assertNotIn("function paginateItems", javascript)
         self.assertIn("state.runPage = 1", javascript)
         self.assertIn("state.exportPage = 1", javascript)
         self.assertIn(".table-pagination-top", styles)
         self.assertIn(".table-pagination-bottom", styles)
+
+    def test_all_views_share_a_scroll_aware_back_to_top_button(self):
+        html = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        javascript = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        styles = (app.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+
+        self.assertEqual(html.count('id="back-to-top"'), 1)
+        self.assertIn('aria-label="回到页面顶部"', html)
+        self.assertIn("function updateBackToTopVisibility()", javascript)
+        self.assertIn('window.scrollY < 480', javascript)
+        self.assertIn('window.addEventListener("scroll", scheduleBackToTopVisibility', javascript)
+        self.assertIn('window.scrollTo({ top: 0, behavior: "smooth" })', javascript)
+        self.assertIn(".back-to-top { position: fixed;", styles)
 
     def test_frontend_and_backend_versions_stay_in_sync(self):
         javascript = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
@@ -1396,6 +1413,15 @@ B-5 公共长片段（套模板）
         self.assertIn("evaluation-similarity-warning", styles)
         self.assertIn(".notice { position: fixed;", styles)
         self.assertIn(".notice.success", styles)
+        self.assertIn('class="export-sticky-toolbar"', html)
+        self.assertIn(".export-sticky-toolbar { position: sticky; top: 10px;", styles)
+        sticky_toolbar = html.split('class="export-sticky-toolbar"', 1)[1].split(
+            "</div>\n          </div>", 1
+        )[0]
+        self.assertIn('id="export-selection-count"', sticky_toolbar)
+        self.assertIn('id="preflight-export"', sticky_toolbar)
+        self.assertIn('id="download-export"', sticky_toolbar)
+        self.assertIn('id="solo-qa-submit"', sticky_toolbar)
         self.assertEqual(manifest["manifest_version"], 3)
         self.assertEqual(
             manifest["host_permissions"],
@@ -5421,6 +5447,10 @@ class AutoRefillTests(unittest.TestCase):
         self.assertIn("Feature、Bug 修复和完整模块", html)
         self.assertIn("现有问题整理（Bug 修复）", javascript)
         self.assertIn("/api/settings/auto-refill", javascript)
+        self.assertIn('id="max-parallel-runs"', html)
+        self.assertEqual(html.count('<option value="6">6</option>'), 1)
+        self.assertIn("async function updateMaxParallel()", javascript)
+        self.assertIn("/api/settings/max-parallel", javascript)
 
 
 class IterationGenerationTests(unittest.TestCase):
@@ -6639,6 +6669,114 @@ class ExportTests(unittest.TestCase):
                 ),
             )
         return repo
+
+    def test_run_list_pagination_filters_sorts_and_pins_active_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                for run_id in ("aaa111aaa111", "bbb222bbb222", "ccc333ccc333"):
+                    self.insert_completed_turn(root, run_id)
+                with app.db_connection() as database:
+                    database.execute(
+                        "UPDATE runs SET repo_name = 'alpha', phase = 'first_running', updated_at = '2026-01-01 00:00:00' WHERE id = 'aaa111aaa111'"
+                    )
+                    database.execute(
+                        "UPDATE runs SET repo_name = 'bravo', updated_at = '2026-01-02 00:00:00' WHERE id = 'bbb222bbb222'"
+                    )
+                    database.execute(
+                        "UPDATE runs SET repo_name = 'charlie', updated_at = '2026-01-03 00:00:00' WHERE id = 'ccc333ccc333'"
+                    )
+
+                first_page = app.paginated_runs(
+                    {"page_size": ["1"], "sort": ["updated_at"], "direction": ["desc"]}
+                )
+                filtered = app.paginated_runs({"query": ["bravo"]})
+
+        self.assertEqual(first_page["total"], 3)
+        self.assertEqual(first_page["total_pages"], 3)
+        self.assertEqual([item["id"] for item in first_page["items"]], ["ccc333ccc333"])
+        self.assertEqual([item["id"] for item in first_page["active_items"]], ["aaa111aaa111"])
+        self.assertFalse(first_page["has_generation_job"])
+        self.assertEqual(filtered["total"], 1)
+        self.assertEqual(filtered["items"][0]["id"], "bbb222bbb222")
+
+    def test_export_list_paginates_before_building_full_turn_summaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                for run_id in ("aaa111aaa111", "bbb222bbb222", "ccc333ccc333"):
+                    self.insert_completed_turn(root, run_id)
+                original = app.completed_turn_summary
+                with mock.patch.object(
+                    app, "completed_turn_summary", wraps=original
+                ) as summarize:
+                    page = app.completed_turns_page(
+                        {"page": ["2"], "page_size": ["1"]}
+                    )
+
+        self.assertEqual(page["total"], 3)
+        self.assertEqual(page["page"], 2)
+        self.assertEqual(page["start_item"], 2)
+        self.assertEqual(page["end_item"], 2)
+        self.assertEqual(len(page["items"]), 1)
+        self.assertEqual(summarize.call_count, 1)
+
+    def test_export_page_exposes_unsubmitted_predecessor_across_pages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                self.insert_completed_turn(root)
+                timestamp = app.now_text()
+                source = app.completed_turn_rows()[0]
+                trace_path = root / "traces" / "session-export" / "turn-02.jsonl"
+                trace_path.write_text(
+                    json.dumps(
+                        {
+                            "type": "user",
+                            "sessionId": "session-export",
+                            "version": "2.1.263",
+                            "promptId": "prompt-export-2",
+                            "message": {"content": "第二轮题面"},
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                with app.db_connection() as database:
+                    database.execute(
+                        """INSERT INTO run_turns(
+                             run_id, turn_number, intent_type, prompt, model, prompt_id,
+                             review_result, commit_sha, trajectory_path, trajectory_sha256,
+                             status, verification, created_at, updated_at
+                           ) VALUES (?, 2, 'Bug 修复', '第二轮题面', 'gpt-5.6-sol',
+                                     'prompt-export-2', ?, 'cccccccccccccccccccccccccccccccccccccccc',
+                                     ?, ?, 'complete', '[]', ?, ?)""",
+                        (
+                            source["run_id"],
+                            source["turn_review_result"],
+                            str(trace_path),
+                            hashlib.sha256(trace_path.read_bytes()).hexdigest(),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                page = app.completed_turns_page({"page_size": ["1"]})
+
+        self.assertEqual(page["items"][0]["turn_number"], 2)
+        self.assertEqual(
+            page["items"][0]["unsubmitted_predecessor"],
+            {"key": "abc123abc123:1", "turn_number": 1},
+        )
 
     def test_export_never_falls_back_to_full_session_trace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -8800,8 +8938,57 @@ class ResilienceTests(unittest.TestCase):
 
 
 class ConcurrencyTests(unittest.TestCase):
-    def test_default_parallel_limit_is_four(self):
-        self.assertEqual(app.MAX_PARALLEL_RUNS, 4)
+    def test_parallel_limit_defaults_to_four_and_allows_up_to_six(self):
+        self.assertEqual(app.DEFAULT_MAX_PARALLEL_RUNS, 4)
+        self.assertEqual(app.MAX_PARALLEL_RUNS_LIMIT, 6)
+
+    def test_parallel_limit_is_persisted_and_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                self.assertEqual(app.configured_max_parallel_runs(), 4)
+                saved = app.set_max_parallel_runs({"max_parallel": 6})
+                self.assertEqual(saved, {"max_parallel": 6, "max_allowed": 6})
+                self.assertEqual(app.configured_max_parallel_runs(), 6)
+                self.assertEqual(app.auto_refill_configuration()["max_parallel"], 6)
+                for invalid in (0, 7, 2.0, True, "3"):
+                    with self.assertRaisesRegex(app.WorkflowError, "1 至 6"):
+                        app.set_max_parallel_runs({"max_parallel": invalid})
+
+    def test_worker_slot_uses_updated_parallel_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_started = threading.Event()
+            second_started = threading.Event()
+            release_workers = threading.Event()
+
+            def occupy_slot(started):
+                with app.worker_slot():
+                    started.set()
+                    release_workers.wait(2)
+
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(
+                app, "WORKER_SEMAPHORE", threading.BoundedSemaphore(6)
+            ), mock.patch.object(app, "WORKER_SLOT_ACTIVE", 0):
+                app.initialize_database()
+                app.set_max_parallel_runs({"max_parallel": 1})
+                first = threading.Thread(target=occupy_slot, args=(first_started,))
+                second = threading.Thread(target=occupy_slot, args=(second_started,))
+                first.start()
+                self.assertTrue(first_started.wait(1))
+                second.start()
+                time.sleep(0.08)
+                self.assertFalse(second_started.is_set())
+                app.set_max_parallel_runs({"max_parallel": 2})
+                self.assertTrue(second_started.wait(1))
+                release_workers.set()
+                first.join(1)
+                second.join(1)
 
     def test_scheduler_respects_parallel_limit(self):
         with tempfile.TemporaryDirectory() as directory:

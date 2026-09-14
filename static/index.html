@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>Claude Eval Console</title>
-    <link rel="stylesheet" href="/styles.css?v=38" />
+    <link rel="stylesheet" href="/styles.css?v=39" />
   </head>
   <body>
     <div class="shell">
@@ -71,6 +71,17 @@
               </div>
             </div>
             <div class="auto-refill-controls">
+              <label class="parallel-limit-control" for="max-parallel-runs">
+                <span>并行上限</span>
+                <select id="max-parallel-runs" aria-label="并行任务上限">
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4" selected>4</option>
+                  <option value="5">5</option>
+                  <option value="6">6</option>
+                </select>
+              </label>
               <div class="auto-refill-timer-controls hidden" id="auto-refill-start-controls">
                 <label class="auto-refill-hours" for="auto-refill-start-hours">
                   <input id="auto-refill-start-hours" type="number" min="0.5" max="168" step="0.5" value="2" inputmode="decimal" aria-label="自动开始小时数" />
@@ -176,6 +187,19 @@
             <button class="back-button" id="export-back-to-list" type="button">← 返回运行记录</button>
             <span>轮次导出</span>
           </div>
+          <div class="export-sticky-toolbar" aria-label="导出批量操作">
+            <div class="export-sticky-context">
+              <b id="export-selection-count">已选 0 项</b>
+              <span class="solo-qa-bridge-status disconnected" id="solo-qa-bridge-status">提交助手未连接</span>
+            </div>
+            <div class="export-sticky-actions">
+              <button class="secondary-button" id="preflight-export" type="button">提交前检查</button>
+              <button class="secondary-button" id="select-preflight-passed" type="button" disabled>只选择检查通过项</button>
+              <button class="secondary-button" id="download-export" type="button" disabled>导出 Excel</button>
+              <button class="secondary-button" id="solo-qa-sync" type="button" disabled>同步我的提交</button>
+              <button class="primary-button" id="solo-qa-submit" type="button" disabled>提交所选轮次</button>
+            </div>
+          </div>
           <div class="export-card">
             <div class="export-heading">
               <div>
@@ -184,11 +208,7 @@
                 <p>每个已完成轮次占一行；不能导出的轮次会在状态下方直接列出缺失资料。</p>
               </div>
               <div class="export-actions">
-                <b id="export-selection-count">已选 0 项</b>
                 <button class="danger-button" id="delete-selected-export-turns" type="button" disabled>删除所选</button>
-                <button class="secondary-button" id="preflight-export" type="button">提交前检查</button>
-                <button class="secondary-button" id="select-preflight-passed" type="button" disabled>只选择检查通过项</button>
-                <button class="primary-button" id="download-export" type="button" disabled>导出 Excel</button>
               </div>
             </div>
             <form class="export-filters" id="export-filters">
@@ -254,13 +274,12 @@
             </form>
             <div class="export-preflight-panel" id="export-preflight-panel">
               <strong>尚未执行提交前检查</strong>
-              <span>未勾选时检查列表中的全部完成轮次；勾选后只检查所选轮次。</span>
+              <span>未勾选时检查当前页；勾选后只检查所选轮次。</span>
             </div>
             <div class="solo-qa-panel">
               <div class="solo-qa-copy">
                 <div class="solo-qa-title-row">
                   <strong>提交到 SOLO-QA</strong>
-                  <span class="solo-qa-bridge-status disconnected" id="solo-qa-bridge-status">提交助手未连接</span>
                 </div>
                 <p id="solo-qa-status-detail">历史提交按需手动同步；正式提交只核对当前所选轮次。</p>
                 <details>
@@ -272,8 +291,6 @@
               </div>
               <div class="solo-qa-actions">
                 <a class="secondary-button" href="https://solo2.jzxhnh.com/app/submissions" target="_blank" rel="noopener noreferrer">打开我的提交</a>
-                <button class="secondary-button" id="solo-qa-sync" type="button" disabled>同步我的提交</button>
-                <button class="primary-button" id="solo-qa-submit" type="button" disabled>提交所选轮次</button>
               </div>
             </div>
             <nav class="table-pagination table-pagination-top" data-table-pagination="exports" aria-label="导出列表上方分页"></nav>
@@ -369,6 +386,8 @@
       </main>
     </div>
 
+    <button class="back-to-top hidden" id="back-to-top" type="button" aria-label="回到页面顶部" title="回到顶部"><span aria-hidden="true">↑</span>回到顶部</button>
+
     <template id="empty-detail-template">
       <div class="empty-state"><div>⌁</div><h2>选择一条运行记录</h2><p>查看仓库、会话和逐轮执行结果。</p></div>
     </template>
@@ -392,6 +411,6 @@
         </div>
       </form>
     </dialog>
-    <script src="/app.js?v=70" defer></script>
+    <script src="/app.js?v=72" defer></script>
   </body>
 </html>
