@@ -1,4 +1,4 @@
-const UI_VERSION = "20260913.1";
+const UI_VERSION = "20260914.3";
 const EXPORT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const TABLE_PAGE_SIZE = 20;
 
@@ -671,9 +671,27 @@ function evaluationHtml(evaluation, title) {
   </div>`;
 }
 
+function effectiveTurnEvaluation(turn) {
+  const legacy = turn?.review_result?.evaluation || {};
+  const candidate = turn?.evaluation_candidate || {};
+  const validated = Number(turn?.evaluation_schema_version || 1) >= 2
+    ? (turn?.validated_evaluation || {})
+    : legacy;
+  const manual = turn?.manual_evaluation || {};
+  const base = Object.keys(validated).length
+    ? validated
+    : (Object.keys(manual).length ? candidate : {});
+  if (!Object.keys(base).length && !Object.keys(manual).length) return null;
+  const effective = { ...base };
+  exportEvaluationDimensions.forEach(([key]) => {
+    if (manual[key]) effective[key] = { ...manual[key] };
+  });
+  return effective;
+}
+
 function turnDeliveryRows(run, turn) {
   const turnNumber = Number(turn?.turn_number || 1);
-  const evaluation = turn?.review_result?.evaluation;
+  const evaluation = effectiveTurnEvaluation(turn);
   const value = (field, fallback = "") => evaluation?.[field] || fallback;
   const score = (field) => evaluation?.[field]?.score || "";
   const description = (field) => evaluation?.[field]?.description || "";
@@ -725,6 +743,7 @@ function turnHistoryHtml(runId, turns) {
   if (!turns?.length) return '<div class="side-empty">暂无逐轮记录</div>';
   return `<div class="turn-history">${turns.map((turn) => {
     const review = turn.review_result || {};
+    const evaluation = effectiveTurnEvaluation(turn);
     const bugs = review.bugs || review.remaining_bugs || [];
     const reviewRecord = review.summary ? { ...review, bugs } : null;
     const statusLabels = {
@@ -750,13 +769,14 @@ function turnHistoryHtml(runId, turns) {
         ${metadataItem("轨迹检查点", turn.trajectory_path, `turn-${turn.turn_number}-trajectory`)}
         ${metadataItem("轨迹 SHA-256", turn.trajectory_sha256, `turn-${turn.turn_number}-trajectory-sha`)}
         ${metadataItem("Claude 模型", turn.model, `turn-${turn.turn_number}-model`)}
-        ${metadataItem("本轮任务类型", review.evaluation?.task_type || turn.intent_type, `turn-${turn.turn_number}-type`)}
+        ${metadataItem("本轮任务类型", evaluation?.task_type || turn.intent_type, `turn-${turn.turn_number}-type`)}
         ${metadataItem("后台任务", turn.agent_id, `turn-${turn.turn_number}-agent`)}
       </div>
       ${turn.result ? `<details class="turn-block" data-detail-key="turn-${turn.turn_number}-result" ${detailOpenAttribute(runId, `turn-${turn.turn_number}-result`)}><summary>Claude 执行结果 <span>展开查看</span></summary><div class="turn-content">${escapeHtml(turn.result)}</div></details>` : ""}
       ${validationHtml(turn.verification, `第 ${turn.turn_number} 轮 Docker 验收`)}
       ${reviewRecord ? reviewHtml(reviewRecord, `第 ${turn.turn_number} 轮 GPT 检查`) : ""}
-      ${evaluationHtml(review.evaluation, `第 ${turn.turn_number} 轮评分`)}
+      ${evaluationHtml(evaluation, `第 ${turn.turn_number} 轮评分`)}
+      ${!evaluation && turn.evaluation_candidate ? `<div class="export-evaluation-empty">本轮自动评分仍在严格校验或等待人工确认，候选稿不作为正式评分展示和导出。</div>` : ""}
     </section>`;
   }).join("")}</div>`;
 }
@@ -1419,27 +1439,37 @@ const exportEvaluationDimensions = [
 function exportEvaluationDraft(turn) {
   const saved = state.exportEvaluationDrafts.get(turn.key);
   if (saved) return saved;
+  const source = turn.evaluation || turn.evaluation_candidate || {};
   const draft = {};
   exportEvaluationDimensions.forEach(([key]) => {
     draft[key] = {
-      score: Number(turn.evaluation?.[key]?.score || 0),
-      description: String(turn.evaluation?.[key]?.description || ""),
+      score: Number(source?.[key]?.score || 0),
+      description: String(source?.[key]?.description || ""),
     };
   });
   return draft;
 }
 
 function exportEvaluationEditorHtml(turn) {
-  if (!turn.evaluation) {
+  if (!turn.evaluation && !turn.evaluation_candidate) {
     return '<div class="export-evaluation-empty">该轮尚无可编辑评分。</div>';
   }
   const draft = exportEvaluationDraft(turn);
   const busy = state.exportEvaluationBusy.has(turn.key);
+  const similarityMessages = [
+    ...(Array.isArray(turn.export_issues) ? turn.export_issues : []),
+    ...(Array.isArray(turn.evaluation_similarity_warnings)
+      ? turn.evaluation_similarity_warnings
+      : []),
+  ].filter((message) => /已质检通过记录|B-5|整体写法较相似/.test(String(message)));
   const status = turn.evaluation_overridden
     ? `<span class="manual">已人工修改${turn.evaluation_override_updated_at ? ` · ${escapeHtml(turn.evaluation_override_updated_at)}` : ""}</span>`
-    : "<span>当前为自动评分</span>";
+    : (turn.evaluation
+      ? `<span>当前为已校验自动评分${turn.evaluation_validated_at ? ` · ${escapeHtml(turn.evaluation_validated_at)}` : ""}</span>`
+      : `<span class="manual">自动评分待确认，不用于正式导出${turn.evaluation_warning ? ` · ${escapeHtml(turn.evaluation_warning)}` : ""}</span>`);
   return `<section class="export-evaluation-editor" data-evaluation-editor="${escapeHtml(turn.key)}">
     <div class="export-evaluation-heading"><div><strong>五维评分与描述</strong>${status}</div><small>保存后，Excel 导出和 SOLO-QA 提交均使用这里的内容。</small></div>
+    ${similarityMessages.length ? `<div class="evaluation-similarity-warning">${escapeHtml(similarityMessages.join("；"))}</div>` : ""}
     <div class="export-evaluation-grid">${exportEvaluationDimensions.map(([key, label]) => {
       const item = draft[key] || {};
       return `<label class="export-evaluation-item"><span>${escapeHtml(label)}</span><select data-evaluation-key="${escapeHtml(turn.key)}" data-evaluation-dimension="${key}" data-evaluation-field="score" aria-label="${escapeHtml(label)}分数">${[1, 2, 3, 4, 5].map((score) => `<option value="${score}" ${Number(item.score) === score ? "selected" : ""}>${score} 分</option>`).join("")}</select><textarea rows="6" maxlength="2000" data-evaluation-key="${escapeHtml(turn.key)}" data-evaluation-dimension="${key}" data-evaluation-field="description" aria-label="${escapeHtml(label)}描述">${escapeHtml(item.description || "")}</textarea></label>`;
@@ -1469,7 +1499,7 @@ async function saveExportEvaluation(turnKey, reset = false) {
   state.exportEvaluationBusy.add(turnKey);
   renderExportPage();
   try {
-    await api("/api/exports/turns/evaluation", {
+    const saved = await api("/api/exports/turns/evaluation", {
       method: "POST",
       body: JSON.stringify({
         turn_key: turnKey,
@@ -1480,8 +1510,18 @@ async function saveExportEvaluation(turnKey, reset = false) {
     state.exportEvaluationDrafts.delete(turnKey);
     state.exportPreflight = null;
     await loadCompletedTurns();
+    const similarityMessages = [
+      ...(Array.isArray(saved.export_issues) ? saved.export_issues : []),
+      ...(Array.isArray(saved.evaluation_similarity_warnings)
+        ? saved.evaluation_similarity_warnings
+        : []),
+    ].filter((message) => /已质检通过记录|B-5|整体写法较相似/.test(String(message)));
     showNotice(
-      reset ? "已恢复自动评分；后续导出和提交将使用自动版本" : "评分修改已保存；后续导出和提交将使用人工版本",
+      reset
+        ? "已恢复自动评分；后续导出和提交将使用自动版本"
+        : (similarityMessages.length
+          ? `评分修改已保存；发现历史相似表达，请按页面提示修改后再导出`
+          : "评分修改已保存；后续导出和提交将使用人工版本"),
       "success",
     );
   } catch (error) {

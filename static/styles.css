@@ -449,6 +449,7 @@ textarea { padding: 13px 14px; border-radius: 10px; resize: vertical; line-heigh
 .export-evaluation-heading span { padding: 3px 7px; border-radius: 999px; color: #66746f; background: #edf1ef; font-size: 8px; font-weight: 800; }
 .export-evaluation-heading span.manual { color: #8a5a13; background: #fff0d4; }
 .export-evaluation-heading small { color: #7f8c87; font-size: 9px; }
+.evaluation-similarity-warning { margin: -3px 0 12px; padding: 8px 10px; border: 1px solid #e9cc82; border-radius: 8px; color: #72520e; background: #fff8df; font-size: 9px; font-weight: 700; line-height: 1.55; }
 .export-evaluation-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
 .export-evaluation-item { min-width: 0; display: grid; grid-template-columns: 1fr 72px; gap: 6px; align-items: center; }
 .export-evaluation-item > span { color: #4d5f59; font-size: 9px; font-weight: 850; }

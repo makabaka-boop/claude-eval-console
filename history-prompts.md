@@ -1007,3 +1007,168 @@
 <!-- prompt-end -->
 <!-- task-entry-end -->
 
+<!-- task-entry-start {"run_id": "7215d9630f0e", "repo_name": "silo-fumigation-exposure-api", "task_type": "0-1 代码生成", "project_category": "纯后端", "language_framework": "Python 3.12, FastAPI, Pydantic, pytest, Docker, Docker Compose", "summary": "粮仓熏蒸结束后，采样仪只留下不等间隔的磷化氢浓度读数，复核员需要判断是否存在一段连续且足够长的有效暴露，不能把分离的短时达标区间相加。 … 成功响应列出全部有效区间、最长持续毫秒数，并仅以最长持续毫秒数是否不小于最低持续秒数乘以 1000 作出合格结论；非法输入返回字段级定位且不产生判定。"} -->
+## 0057 · silo-fumigation-exposure-api
+
+- 创建时间：2026-09-13 14:31:58 +0800
+- 项目类别：纯后端
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, pytest, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+粮仓熏蒸结束后，采样仪只留下不等间隔的磷化氢浓度读数，复核员需要判断是否存在一段连续且足够长的有效暴露，不能把分离的短时达标区间相加。请从空仓库实现纯后端 JSON API，使用 Python 3.12、FastAPI、Pydantic 和 pytest，并配置 Docker Compose；宿主端口由 API_PORT 覆盖，提供名为 verify 的一次性验收服务。请求包含仓号、目标阈值 ppm、最低持续秒数和按时间排列的读数；最低持续秒数必须为大于零的有限数且最多三位小数，浓度与阈值必须为非负有限数。时间戳必须是以 Z 结尾、精确到毫秒的 ISO 8601 UTC 格式，至少两条且严格递增，采样首尾跨度不得短于最低持续时间。相邻读数间按直线插值，浓度等于阈值计入有效区间；穿越时刻换算为 Unix 毫秒后四舍五入，恰为半毫秒时向远离零方向取整。原始端点直接使用其毫秒值，区间持续毫秒数为右端点减左端点；首尾均闭合，相接区间合并，分离区间不得累计。实现领域契约、独立计算器及路由错误映射，拒绝占位或固定结果。成功响应列出全部有效区间、最长持续毫秒数，并仅以最长持续毫秒数是否不小于最低持续秒数乘以 1000 作出合格结论；非法输入返回字段级定位且不产生判定。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "82410d01a002", "repo_name": "incubator-label-print-calibrator", "task_type": "0-1 代码生成", "project_category": "纯前端", "language_framework": "TypeScript, React, Vite, CSS Paged Media, Vitest, Playwright, Docker, Docker Compose", "summary": "恒温箱样本牌若在屏幕完整、打印后却裁掉批次或到期日，接收员便无法安全放行样本。 … 不得联网、伪造状态或保留未实现按钮，Vitest 覆盖规则，Playwright 验证预览与打印样"} -->
+## 0058 · incubator-label-print-calibrator
+
+- 创建时间：2026-09-13 16:36:17 +0800
+- 项目类别：纯前端
+- 任务难度：待评估
+- 语言/框架：TypeScript, React, Vite, CSS Paged Media, Vitest, Playwright, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+恒温箱样本牌若在屏幕完整、打印后却裁掉批次或到期日，接收员便无法安全放行样本。请从空仓库建立纯前端打印校准台，使用 TypeScript、React、Vite 与 CSS Paged Media，Docker Compose 运行单一 Web 应用并提供一次性 verify 服务，WEB_PORT 可覆盖宿主端口。用户录入样本编号、批次、培养条件、到期日并选择方向；前三项分别最多 18、24、24 个 Unicode 码点且不得换行，编号必填，日期须为有效 YYYY-MM-DD。横向边界固定 70×35 毫米，纵向固定 35×70 毫米，内边距均为 2 毫米；预览毫米值指 CSS 绝对单位逻辑边界。标签采用随仓库交付的同一 WOFF2 字体，字号 3 毫米、行高 4 毫米，四字段按四个等高行排列，每行标签列固定 12 毫米、值列占余宽，文字不得换行或缩放。以各值元素的 scrollWidth、scrollHeight 与 clientWidth、clientHeight 判定溢出；字段非法或任一值溢出时汇总原因并禁用打印。打印时页边距为零且仅输出样本牌，方向、外框和可见文字须与预览一致。打印能力仅按可观测条件裁决：window.print 不是函数时禁用并提示；调用同步抛错时显示失败。不得联网、伪造状态或保留未实现按钮，Vitest 覆盖规则，Playwright 验证预览与打印样
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "5d1c96458051", "repo_name": "stage-rope-cut-planner", "task_type": "0-1 代码生成", "project_category": "全栈", "language_framework": "Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker", "summary": "剧场临时换景前，索具备料员需把多卷原绳裁成指定吊索，锯口损耗会使仅按总长度排料的方案失败。 … 使用 pytest、Vitest、Playwright 覆盖求解与提交展示；Docker Compose 启动 Web 和 API，WEB_PORT、API_PORT 可覆盖宿主端口，并提供一次性 v"} -->
+## 0059 · stage-rope-cut-planner
+
+- 创建时间：2026-09-13 18:16:06 +0800
+- 项目类别：全栈
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker
+
+### User Prompt
+
+<!-- prompt-start -->
+剧场临时换景前，索具备料员需把多卷原绳裁成指定吊索，锯口损耗会使仅按总长度排料的方案失败。请从空仓库实现全栈编排台：浏览器录入各卷可用长度、若干“目标长度×数量”和统一锯口损耗；长度须为正整数毫米，损耗须为非负整数毫米，每取得一段即消耗目标长度加一次损耗，卷尾不另计。系统只生成覆盖全部目标段的方案，不得部分满足。最优规则依次为：最小化实际使用原绳卷的余料总和、最小化使用卷数、最小化规范化方案的字典序；规范化方案包含全部原绳并按录入序号排列，每卷目标长度升序，未使用卷为空列表，按列表的标准逐项字典序比较，以此唯一裁决。自行实现带剪枝的确定性搜索，不得调用外部求解器。采用 React、TypeScript、FastAPI、Pydantic 完成真实联调，页面逐卷展示切割长度、累计消耗和余料；非法字段就地提示并保留上一次有效方案。计入损耗后无完整解时，API 与界面仅给出明确不可行结论，清空待执行切割单，不要求计算缺口。使用 pytest、Vitest、Playwright 覆盖求解与提交展示；Docker Compose 启动 Web 和 API，WEB_PORT、API_PORT 可覆盖宿主端口，并提供一次性 verify 服务；README 前段说明运行方式，禁止固定响应和未实现占位。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "d0e578bd8e10", "repo_name": "exhibit-label-contrast-checker", "task_type": "0-1 代码生成", "project_category": "纯前端", "language_framework": "TypeScript, React, Vite, Vitest, Playwright, Docker, Docker Compose", "summary": "博物馆展签送印前，视觉设计师与无障碍审校员需要避免仅凭屏幕观感判断临界配色；请从空仓库起步实现纯浏览器核验台，使用 TypeScript、React 与 Vite。 … Docker Compose 提供浏览器应用和名为 verify 的一次性验收服务，应用宿主端口可由 WEB_PORT 覆盖，使临界样例得到唯一且可复算的印前结论。"} -->
+## 0062 · exhibit-label-contrast-checker
+
+- 创建时间：2026-09-13 21:14:35 +0800
+- 项目类别：纯前端
+- 任务难度：待评估
+- 语言/框架：TypeScript, React, Vite, Vitest, Playwright, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+博物馆展签送印前，视觉设计师与无障碍审校员需要避免仅凭屏幕观感判断临界配色；请从空仓库起步实现纯浏览器核验台，使用 TypeScript、React 与 Vite。表单只接受形如 #RRGGBB 的六位十六进制前景色和背景色、大于 0 的 CSS 像素字号，以及普通或粗体选项。每个 sRGB 通道先除以 255；值不大于 0.04045 时除以 12.92，否则取 ((值+0.055)/1.055)^2.4；相对亮度为 0.2126R+0.7152G+0.0722B，对比度为较亮亮度加 0.05 后除以较暗亮度加 0.05。普通字重且字号至少 24px，或粗体且至少 18.66px，归为大号文字；普通文字 AA、AAA 阈值为 4.5、7，大号文字为 3、4.5。裁决必须使用未舍入比值并包含等于阈值的情况，仅展示值四舍五入到两位。任一字段非法时就地报错并保留上一份有效结果。结果卡呈现原始配色、两位比值及普通与大号文字的 AA、AAA 四项结论，并可复制与当前结果一致的纯文本摘要。使用 Vitest 覆盖公式、分类和阈值边界，Playwright 覆盖合法输入、错误保留及摘要复制；禁止外部在线调用和占位计算。Docker Compose 提供浏览器应用和名为 verify 的一次性验收服务，应用宿主端口可由 WEB_PORT 覆盖，使临界样例得到唯一且可复算的印前结论。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "2e9727b75cb7", "repo_name": "wireless-intermod-screening-console", "task_type": "0-1 代码生成", "project_category": "全栈", "language_framework": "Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker", "summary": "演出彩排临时增加无线话筒后，单看每个载频都合法，三阶互调产物却可能贴近另一支话筒并造成现场爆音。 … 验收者应能看到保护带边界被稳定命中，而安全清单明确显示零项冲突。"} -->
+## 0063 · wireless-intermod-screening-console
+
+- 创建时间：2026-09-13 21:18:22 +0800
+- 项目类别：全栈
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker
+
+### User Prompt
+
+<!-- prompt-start -->
+演出彩排临时增加无线话筒后，单看每个载频都合法，三阶互调产物却可能贴近另一支话筒并造成现场爆音。请从空仓库起步，用 React、TypeScript 与 FastAPI 建成联调排查台；开发说明随频率示例解释判定口径，自动化测试覆盖边界、排序和页面提交，所有错误须给出对应行号，不得返回假接口。Docker Compose 提供 Web、API 和名为 verify 的一次性验收服务，WEB_PORT、API_PORT 可覆盖宿主端口。用户一次提交二至三十二个名称唯一的频道，频率范围为 470.000 至 694.000 MHz，必须最多三位小数且互不重复；系统先将频率精确换成整数 kHz。对每一对不同频道 A、B 分别计算 2A-B 与 2B-A，只保留仍在上述频段内的产物；若产物与生成它的两个频道之外任一已分配频率相差不超过 50 kHz，包括恰好 50 kHz，即记为冲突。相同产物与目标频道只展示一次，但须列全来源组合，来源内按频道名称排序；总结果依次按目标频率、产物频率和目标名称排序。页面以受影响频道分组显示差值、产物和来源，并生成可复制摘要；整批输入有误时不得给出部分风险。验收者应能看到保护带边界被稳定命中，而安全清单明确显示零项冲突。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "2bd0413e446f", "repo_name": "mortar-moisture-correction-api", "task_type": "0-1 代码生成", "project_category": "纯后端", "language_framework": "Python 3.12, FastAPI, Pydantic, Decimal, pytest, Docker, Docker Compose", "summary": "雨后砂堆含水变化会让预拌砂浆按干配方直接投料时同时偏离骨料量和实际加水量，配料复核员需要在开机前得到可复算的修正单。 … Docker Compose 仅运行 API，API_PORT 可覆盖宿主端口，并提供名为 verify 的一次性验收服务，使多骨料样例最终返回唯一的湿投料清单和三位小数加水量。"} -->
+## 0064 · mortar-moisture-correction-api
+
+- 创建时间：2026-09-13 22:32:42 +0800
+- 项目类别：纯后端
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, Decimal, pytest, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+雨后砂堆含水变化会让预拌砂浆按干配方直接投料时同时偏离骨料量和实际加水量，配料复核员需要在开机前得到可复算的修正单。请从空仓库实现纯后端 API，使用 Python 3.12、FastAPI、Pydantic 与 Decimal；无需数据库，单次请求携带设计加水量以及一至八种骨料的名称、干基目标质量、含水率和吸水率，质量单位统一为 kg，两个百分率均按质量百分数输入。对每种骨料固定计算湿投料量＝干基目标质量×(1＋含水率/100)，自由水量＝干基目标质量×(含水率－吸水率)/100，最终加水量＝设计加水量－各项自由水量之和；中间值保持完整精度，响应中的逐项质量和总量统一按 ROUND_HALF_UP 保留三位小数。实现请求校验、修正计算和批次汇总三个模块，pytest 覆盖公式与边界，README 说明契约，错误反馈定位到骨料下标，禁止假接口或固定响应。含水率限定 0 至 40、吸水率限定 0 至 15，端点均包含，所有质量须大于零；最终加水量为零合法，小于零则以 422 整体拒绝且不返回部分修正单。Docker Compose 仅运行 API，API_PORT 可覆盖宿主端口，并提供名为 verify 的一次性验收服务，使多骨料样例最终返回唯一的湿投料清单和三位小数加水量。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "83801c532b81", "repo_name": "mural-overlay-inspection", "task_type": "0-1 代码生成", "project_category": "纯前端", "language_framework": "TypeScript, React, Vite, Canvas 2D API, Vitest, Playwright, Docker, Docker Compose", "summary": "修复前后的壁画照片常被分别放大查看，细小补绘差异会因视口漂移而被误判；请从空仓库起步实现纯浏览器擦镜核验台，使用 TypeScript、React、Vite 与 Canvas 2D API，只读取用户本地 PNG 或 JPEG，不上传文件或访问在线服务。 … 损坏、非目标格式或异尺寸的新文件须定位原因且保留上一组有效影像与视口，最终拖到任一边缘时应只剩对应单图，回到中部仍逐点对齐。"} -->
+## 0065 · mural-overlay-inspection
+
+- 创建时间：2026-09-13 22:46:35 +0800
+- 项目类别：纯前端
+- 任务难度：待评估
+- 语言/框架：TypeScript, React, Vite, Canvas 2D API, Vitest, Playwright, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+修复前后的壁画照片常被分别放大查看，细小补绘差异会因视口漂移而被误判；请从空仓库起步实现纯浏览器擦镜核验台，使用 TypeScript、React、Vite 与 Canvas 2D API，只读取用户本地 PNG 或 JPEG，不上传文件或访问在线服务。载入两图时以天然像素宽高为准，尺寸必须完全相同；成功后共享同一原图坐标视口，左侧显示修复前、右侧显示修复后，竖直分界线限定在画布内。倍率仅允许 1、2、4 倍，切换时保持当前视口中心对应的原图坐标不变；平移后按各轴钳制到不出现画布空白，图像小于视口的轴固定居中。分界位置取指针相对画布左边缘的 CSS 像素四舍五入为整数，再限制到 0 至画布 CSS 宽度，方向键每次移动 1 像素，并显示倍率、分界像素及视口中心原图坐标。用 Vitest 单测坐标归一化与边界，用 Playwright 覆盖载入和交互；Docker Compose 运行 Web，WEB_PORT 可覆盖宿主端口，并提供名为 verify 的一次性验收服务。损坏、非目标格式或异尺寸的新文件须定位原因且保留上一组有效影像与视口，最终拖到任一边缘时应只剩对应单图，回到中部仍逐点对齐。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "c99f37dcd44f", "repo_name": "allergen-claim-release", "task_type": "0-1 代码生成", "project_category": "全栈", "language_framework": "Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker", "summary": "包装即将送印时，配方原料本身与共线接触信息常被分开核对，复核员可能因此放过一条不成立的“不含”声明；请从空仓库起步，以 Python 3.12、FastAPI、Pydantic、TypeScript、React 和 Vite 实现真实联调的放行台。 … 非法枚举、空配方或缺失标记返回字段级错误且不产生判定，合法请求则逐条返回直接成分与共线证据，使安全配方显示“可印刷”，任一命中都明确阻断对应声明。"} -->
+## 0066 · allergen-claim-release
+
+- 创建时间：2026-09-13 23:05:05 +0800
+- 项目类别：全栈
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker
+
+### User Prompt
+
+<!-- prompt-start -->
+包装即将送印时，配方原料本身与共线接触信息常被分开核对，复核员可能因此放过一条不成立的“不含”声明；请从空仓库起步，以 Python 3.12、FastAPI、Pydantic、TypeScript、React 和 Vite 实现真实联调的放行台。浏览器提供结构化配方表：每行分别勾选牛奶、花生、小麦、大麦、黑麦成分，并填写同组共线接触标记，声明只能选择“不含牛奶”“不含花生”或“不含麸质”。README 说明启动与数据约定，.gitignore 排除生成物，禁止用假接口、固定响应或未实现占位；pytest、Vitest 与 Playwright 覆盖裁决和交互。Docker Compose 启动 Web 与 API，宿主端口分别由 WEB_PORT、API_PORT 覆盖，并提供名为 verify 的一次性验收服务。放行条件固定为所有原料及共线标记均未命中目标项；其中麸质命中集合严格等于小麦、大麦、黑麦。非法枚举、空配方或缺失标记返回字段级错误且不产生判定，合法请求则逐条返回直接成分与共线证据，使安全配方显示“可印刷”，任一命中都明确阻断对应声明。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "47d0e9b9ca35", "repo_name": "mural-overlay-inspection", "task_type": "0-1 代码生成", "project_category": "纯前端", "language_framework": "TypeScript, React, Vite, Canvas 2D API, Vitest, Playwright, Docker, Docker Compose", "summary": "壁画裂隙核验需要一把独立的原图像素测距尺，让文保人员在擦镜画面上记录裂隙两端并读取水平差、垂直差和欧氏长度。 … Vitest 在每次点击推进生命周期时校验距离与留白保持行为，Playwright 从载图、两点落尺到视口变化检查读数和覆盖位置，并确认退出后原有擦镜、取样及文件校验仍可使用。"} -->
+## 0065-3 · mural-overlay-inspection
+
+- 创建时间：2026-09-14 08:07:20 +0800
+- 项目类别：纯前端
+- 任务难度：待评估
+- 语言/框架：TypeScript, React, Vite, Canvas 2D API, Vitest, Playwright, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+壁画裂隙核验需要一把独立的原图像素测距尺，让文保人员在擦镜画面上记录裂隙两端并读取水平差、垂直差和欧氏长度。载入图像对后开启测距，第一次左键确定起点，第二次确定终点并完成测量，第三次点击开始新一轮，退出模式只隐藏尺线和读数而保留最近一次完成结果。建立测距对象及等待起点、等待终点、已完成的生命周期，纯函数接收原图坐标并产出整数端点与保留两位小数的距离，App 持有状态，CompareCanvas 通过专用回调提交点击并绘制青色端点、实线和长度标签。点击居中留白时显示“此处无法测距”并保持当前阶段，测距模式下左键不拖动分界而空格或中键仍可平移，缩放和平移只改变尺线屏幕位置，同尺寸单侧替换继续使用原测量坐标。Vitest 在每次点击推进生命周期时校验距离与留白保持行为，Playwright 从载图、两点落尺到视口变化检查读数和覆盖位置，并确认退出后原有擦镜、取样及文件校验仍可使用。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "64fa175af69f", "repo_name": "mortar-moisture-correction-api", "task_type": "0-1 代码生成", "project_category": "纯后端", "language_framework": "Python 3.12, FastAPI, Pydantic, Decimal, pytest, Docker, Docker Compose", "summary": "实验员需要把烘干法原始称量留成可追溯的含水检测批次，而不是先在表外算出百分率再录入修正单。 … pytest与一次性验收从创建多组称量开始，核对完整精度计算后按ROUND_HALF_UP保留三位的中位数与确认状态，并验证非法称量不落库、重复确认不改结果、重建仓储后仍能读取同一批次。"} -->
+## 0064-3 · mortar-moisture-correction-api
+
+- 创建时间：2026-09-14 09:46:37 +0800
+- 项目类别：纯后端
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, Decimal, pytest, Docker, Docker Compose
+
+### User Prompt
+
+<!-- prompt-start -->
+实验员需要把烘干法原始称量留成可追溯的含水检测批次，而不是先在表外算出百分率再录入修正单。实现独立的取样批次模块，创建时接收料堆名称及二至五组湿样、干样质量，生成批次编号并以“待确认”保存；确认时按（湿样质量－干样质量）÷干样质量×100计算各组结果，以中位数形成代表含水率并置为“已确认”。在当前无数据库基线下用标准库SQLite持久化批次、原始读数、状态和确认结果，仓储层保证整批写入，Pydantic拒绝干样不小于湿样、非正质量及未知字段，错误沿用detail数组并定位readings下标。增加创建和确认两个FastAPI入口，不存在编号与重复确认分别返回结构化404和409，已确认数据不可改动，现有修正单契约保持兼容，Compose仍只启动API且API_PORT可覆盖宿主端口。pytest与一次性验收从创建多组称量开始，核对完整精度计算后按ROUND_HALF_UP保留三位的中位数与确认状态，并验证非法称量不落库、重复确认不改结果、重建仓储后仍能读取同一批次。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+
+<!-- task-entry-start {"run_id": "7786b62a0396", "repo_name": "allergen-claim-release", "task_type": "0-1 代码生成", "project_category": "全栈", "language_framework": "Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker", "summary": "多款产品共用生产线时，复核员需要在排产前识别上一批残留会否带入后续产品，请在现有放行台旁建立独立的换线残留推演模块，以“生产批次序列”为核心对象。 … 原有裁决和方案比较接口、页面状态及Compose端口覆盖保持兼容，Playwright从录入未清洁序列走到真实服务返回的来源解释，并确认清洁后后续批次不再显示残留。"} -->
+## 0066-4 · allergen-claim-release
+
+- 创建时间：2026-09-14 13:19:07 +0800
+- 项目类别：全栈
+- 任务难度：待评估
+- 语言/框架：Python 3.12, FastAPI, Pydantic, TypeScript, React, Vite, pytest, Vitest, Playwright, Docker
+
+### User Prompt
+
+<!-- prompt-start -->
+多款产品共用生产线时，复核员需要在排产前识别上一批残留会否带入后续产品，请在现有放行台旁建立独立的换线残留推演模块，以“生产批次序列”为核心对象。用户按生产顺序录入至少两个批次的名称和五类过敏原直接成分，并在相邻批次间标记是否完成经验证清洁，提交后逐批查看进入残留、前序批次带入物及离开残留，调整顺序后可重新推演。后端增加推演契约与服务，经验证清洁会在下一批开始前清空残留，否则离开残留为进入残留与本批直接成分的并集，带入项仅取本批未直接含有的进入残留，并保留最近来源批次，pytest据此验证连续带入、清洁归零和直接成分不误报。批次数量不足、名称空白或重复、清洁边界缺失及成分标记非布尔时，返回定位到具体批次或边界的字段错误且不产生结果，页面保留输入并就地提示，Vitest验证修正后可再次提交。原有裁决和方案比较接口、页面状态及Compose端口覆盖保持兼容，Playwright从录入未清洁序列走到真实服务返回的来源解释，并确认清洁后后续批次不再显示残留。
+<!-- prompt-end -->
+<!-- task-entry-end -->
+

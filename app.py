@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 import webbrowser
 from contextlib import contextmanager
@@ -85,7 +86,9 @@ INSTANCE_LOCK_PATH = DATA_DIR / "console.lock"
 MAX_BODY_BYTES = 1_000_000
 POLL_SECONDS = 3
 RUN_TIMEOUT_SECONDS = 6 * 60 * 60
-INACTIVITY_WARNING_SECONDS = 30 * 60
+INACTIVITY_WARNING_SECONDS = 10 * 60
+VERIFICATION_TIMEOUT_SECONDS = 15 * 60
+VERIFY_SERVICE_TIMEOUT_SECONDS = 8 * 60
 TERMINAL_ATTENTION_ALERT_INTERVAL_SECONDS = 60
 TERMINAL_ATTENTION_SOUND_PATH = Path(
     os.environ.get(
@@ -127,7 +130,7 @@ SOLO_QA_PROJECT_REJECTION_MARKERS = (
     "题材不合格",
 )
 SUBMITTER_NAME = os.environ.get("CLAUDE_EVAL_SUBMITTER", "张鑫宇").strip() or "张鑫宇"
-APP_VERSION = "20260913.1"
+APP_VERSION = "20260914.3"
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$")
 BACKGROUND_ID_RE = re.compile(r"backgrounded\s+[·•]\s+([A-Za-z0-9_-]+)", re.I)
@@ -311,6 +314,35 @@ EVALUATION_DISALLOWED_PHRASES = (
     "核心流程",
     "未影响定档",
 )
+EVALUATION_SCORE_CONCLUSION_PATTERNS = (
+    re.compile(
+        r"(?:[，,；;]\s*)?"
+        r"(?:(?:因此|所以|故|由此|综合(?:来看|上述))\s*)?"
+        r"(?:第\s*\d+\s*轮\s*)?"
+        r"(?:(?:交付完整性|指令遵循|任务规划|推理能力|执行能力)\s*)?"
+        r"(?:只能|应当|应该|应|仍然|仍|继续|可|可以)?\s*"
+        r"(?:评为|评定为|打为|打成|给(?:到|出)?|保持|维持)\s*"
+        r"[1-5一二三四五]\s*分(?:档)?(?!钟)"
+    ),
+    re.compile(
+        r"(?:[，,；;]\s*)?"
+        r"(?:(?:因此|所以|故|由此|这(?:也)?(?:说明|意味着))\s*)?"
+        r"[^。！？；]{0,48}"
+        r"(?:不足以|不能|无法|没有|还没|尚未|未)"
+        r"[^。！？；]{0,24}"
+        r"(?:满分(?:的)?(?:条件|标准|要求|档位)?|"
+        r"[1-5一二三四五]\s*分(?:的)?(?:条件|标准|要求|档位))"
+    ),
+)
+EVALUATION_SCORE_REFERENCE_RE = re.compile(
+    r"(?:交付完整性|指令遵循|任务规划|推理能力|执行能力)?"
+    r"(?:只能|应当|应该|应|仍然|仍|继续|可|可以)?\s*"
+    r"(?:评为|评定为|打为|打成|给(?:到|出)?|保持|维持)\s*"
+    r"[1-5一二三四五]\s*分(?:档)?(?!钟)"
+    r"|(?:不足以|不能|无法|没有|还没|尚未|未)[^。！？；]{0,40}"
+    r"(?:满分(?:的)?(?:条件|标准|要求|档位)?|"
+    r"[1-5一二三四五]\s*分(?:的)?(?:条件|标准|要求|档位))"
+)
 EVALUATION_COMMAND_NAMES = (
     "npm", "npx", "pnpm", "yarn", "bun", "docker", "docker-compose",
     "pytest", "python", "python3", "uv", "uvicorn", "go", "cargo", "mvn",
@@ -326,6 +358,8 @@ EVALUATION_COMMAND_REFERENCE_RE = re.compile(
 EVALUATION_HIGH_RISK_FRAGMENTS = (
     "全部通过",
     "生产构建成功",
+    "最后记录",
+    "完整检查记录",
     "覆盖指定链路",
     "原有功能保持可用",
     "没有先给出明确阶段计划或持续状态记录",
@@ -334,6 +368,9 @@ EVALUATION_HIGH_RISK_FRAGMENTS = (
     "不扩大到无关历史缺陷",
     "不能造成既有行为退化",
 )
+EVALUATION_HISTORY_MIN_FRAGMENT_CHARS = 14
+EVALUATION_HISTORY_WARNING_RATIO = 0.48
+EVALUATION_HISTORY_WARNING_MIN_CHARS = 36
 EVALUATION_IDENTITY_REFERENCE_PATTERNS = (
     ("AI 浏览器", re.compile(r"(?<![A-Za-z0-9_])ai\s*浏览器", re.I)),
     ("AI Agent", re.compile(r"(?<![A-Za-z0-9_])ai[\s_-]*agent(?![A-Za-z0-9_])", re.I)),
@@ -465,6 +502,25 @@ EVALUATION_ARCHITECTURE_CLAIM_RE = re.compile(
     r"(?:amd64.{0,40}arm64|arm64.{0,40}amd64|错误架构|架构不匹配)",
     re.I,
 )
+EVALUATION_OBSERVED_OUTPUT_CLAIM_RE = re.compile(
+    r"(?:实际输出|现场输出|日志显示|返回结果|报错原文|直接输出)"
+)
+EVALUATION_CONTAINER_SUCCESS_CLAIM_RE = re.compile(
+    r"(?:"
+    r"(?:Docker|Compose|容器|镜像).{0,40}(?:构建|验收|检查|运行|启动|verify)"
+    r".{0,24}(?:通过|成功|完成|退出码\s*0|生成|产出)"
+    r"|(?:容器|镜像).{0,24}(?:通过|成功|完成|退出码\s*0|生成|产出)"
+    r")",
+    re.I,
+)
+EVALUATION_GIT_RESULT_CLAIM_RE = re.compile(
+    r"(?:Git\s*(?:提交|工作树|状态)|git\s+(?:commit|status)|"
+    r"工作树干净|\b[0-9a-f]{7,40}\b)",
+    re.I,
+)
+EVALUATION_POST_FAILURE_SCRIPT_FIX_RE = re.compile(
+    r"(?:随后|之后|后续).{0,64}(?:修正|修改|改写|编辑).{0,16}(?:脚本|\.py|\.sh)"
+)
 EVALUATION_QUOTED_EVIDENCE_RE = re.compile(
     r"`([^`\r\n]{2,})`|[“「]([^”」\r\n]{2,})[”」]"
 )
@@ -511,8 +567,14 @@ PROMPT_HIGH_RISK_FRAGMENTS = (
 )
 BUG_REPAIR_REPEAT_SIMILARITY_LIMIT = 0.72
 BUG_REPAIR_RESIDUAL_MARKERS = ("上轮", "上次修复后", "修复后")
-EVALUATION_DESCRIPTION_GUIDANCE = f"""评分描述写成自然的项目工作记录，不写成评语或验收报告模板，不限制句数。每段按“做了什么—途中遇到什么—最后结果怎样”的顺序组织，从本项目特有的业务对象、测试数量、可观察结果或返工动作切入；没有发生波折时可以省略中间一项，不要为了凑结构编造过程。直接说本轮改了什么、哪里返工、还有什么没验证；一句只承载一组相关事实，功能很多时挑最能说明分数的两三项。不足可以逐项举例，但每项都要落到本轮真实发生的动作和后果。凡是低于 5 分的描述，必须用至少两个完整句子自然写明问题发生在第几轮；整段合计应包含具体步骤或工具调用，以及对应文件、函数、接口、命令、日志或报错中的真实依据，并说明具体不足及其实际影响，不强制这些内容挤在第一句。轨迹中找不到真实不足时不能为了保留非满分而编造问题，但也不能仅凭“最终检查通过”自动评 5 分，仍须逐项满足评分表的满分条件。5 分描述必须写出实际核对或验收依据，并且只能保留正向完成事实；只要描述中保留了本轮真实发生的错误操作、遗漏、失误或返工，该维度就不能评 5 分。预期的 404、409、422 等业务反馈属于契约结果，不要误写成执行失误。五个维度不要使用相同的开头、转折和收尾，也不要把一个维度的扣分点搬到另一个维度：交付完整性优先写本项目已经产生的业务结果；指令遵循优先写题面约束与具体文件、接口或可观察行为之间的对应关系；规划记录真实步骤、状态更新和由规划缺口造成的遗漏或返工，不能只写没有正式清单；推理写定位依据与错误判断，不能用编辑笔误冒充推理问题；执行写具体工具动作、对象、结果与实际后果。测试结果写成“39 项检查通过”或“39 项检查成功”，不要写“全部通过”。禁止使用“X 项成功，覆盖指定链路”“原有功能保持可用”这类固定收尾，应以当前项目的业务对象和实际结果结束。措辞尽量口语化：根据语境把“未”写成“没有”或“还没”，把“均”写成“都”，把“包含”写成“有”；不要改动代码、文件名、接口字段、原始报错或引号内的原文。用通俗方式解释测试数据，不直接抄写 `[0,2,1,1]` 这类原始数字数组；应改写成“零费用项保持为零、其余费用按提交顺序分配”等可观察业务结果，原数组只保留在内部证据中。五维描述直接陈述本轮动作和结果，不使用“用户”这类泛化主语，不出现 AI、AI 浏览器、AI Agent、AI 模型、Codex、GPT、Claude Code 等身份、工具或模型名称，也不用“模型认为”“模型完成了”这类说法指代执行者。执行能力描述不要罗列通用验收命令串或用命令作为固定收尾；如果扣分依据正是错误命令、重复命令或失败工具调用，应写出轨迹中实际存在的命令、文件和结果，提交前会核对引用是否真实。五维描述只能使用当前轮次轨迹、Git 变化和验收结果中真实存在的事实；数字、成功或失败、修改前后状态必须与证据一致。“重复读取”“多次调用”等次数判断必须写出轨迹中可核对的次数；状态被清空、内容被覆盖和架构不匹配等因果判断必须有直接输出，不能只凭后续测试结果反推。不要推测执行者心里“意识到”或“抓住”了什么，也不要为了扣分编造错误。禁用这些措辞：{'、'.join(EVALUATION_DISALLOWED_PHRASES)}。高风险公共片段同样禁用：{'、'.join(EVALUATION_HIGH_RISK_FRAGMENTS)}。不复述分数，不提评分工具、内部提示或生成过程。只评价当前轮次完成的内容。"""
+EVALUATION_DESCRIPTION_GUIDANCE = f"""评分描述写成自然的项目工作记录，不写成评语或验收报告模板，不限制句数。每段按“做了什么—途中遇到什么—最后结果怎样”的顺序组织，从本项目特有的业务对象、测试数量、可观察结果或返工动作切入；没有发生波折时可以省略中间一项，不要为了凑结构编造过程。直接说本轮改了什么、哪里返工、还有什么没验证；一句只承载一组相关事实，功能很多时挑最能说明分数的两三项。不足可以逐项举例，但每项都要落到本轮真实发生的动作和后果。凡是低于 5 分的描述，必须用至少两个完整句子自然写明问题发生在第几轮；整段合计应包含具体步骤或工具调用，以及对应文件、函数、接口、命令、日志或报错中的真实依据，并说明具体不足及其实际影响，不强制这些内容挤在第一句。轨迹中找不到真实不足时不能为了保留非满分而编造问题，但也不能仅凭“最终检查通过”自动评 5 分，仍须逐项满足评分表的满分条件。5 分描述必须写出实际核对或验收依据，并且只能保留正向完成事实；只要描述中保留了本轮真实发生的错误操作、遗漏、失误或返工，该维度就不能评 5 分。预期的 404、409、422 等业务反馈属于契约结果，不要误写成执行失误。五个维度不要使用相同的开头、转折和收尾，也不要把一个维度的扣分点搬到另一个维度：交付完整性优先写本项目已经产生的业务结果；指令遵循优先写题面约束与具体文件、接口或可观察行为之间的对应关系；规划记录真实步骤、状态更新和由规划缺口造成的遗漏或返工，不能只写没有正式清单；推理写定位依据与错误判断，不能用编辑笔误冒充推理问题；执行写具体工具动作、对象、结果与实际后果。测试数量可以写，但不能用“最后记录 X 项……通过”“完整检查记录 X 项通过”这类通用句式收尾；应把数量放到具体测试文件、接口或业务行为旁。测试结果写成“39 项检查通过”或“39 项检查成功”，不要写“全部通过”。禁止使用“X 项成功，覆盖指定链路”“原有功能保持可用”这类固定收尾，应以当前项目的业务对象和实际结果结束。措辞尽量口语化：根据语境把“未”写成“没有”或“还没”，把“均”写成“都”，把“包含”写成“有”；不要改动代码、文件名、接口字段、原始报错或引号内的原文。用通俗方式解释测试数据，不直接抄写 `[0,2,1,1]` 这类原始数字数组；应改写成“零费用项保持为零、其余费用按提交顺序分配”等可观察业务结果，原数组只保留在内部证据中。五维描述直接陈述本轮动作和结果，不使用“用户”这类泛化主语，不出现 AI、AI 浏览器、AI Agent、AI 模型、Codex、GPT、Claude Code 等身份、工具或模型名称，也不用“模型认为”“模型完成了”这类说法指代执行者。执行能力描述不要罗列通用验收命令串或用命令作为固定收尾；如果扣分依据正是错误命令、重复命令或失败工具调用，应写出轨迹中实际存在的命令、文件和结果，提交前会核对引用是否真实。五维描述只能使用当前轮次轨迹、Git 变化和验收结果中真实存在的事实；数字、成功或失败、修改前后状态必须与证据一致。“重复读取”“多次调用”等次数判断必须写出轨迹中可核对的次数；状态被清空、内容被覆盖和架构不匹配等因果判断必须有直接输出，不能只凭后续测试结果反推。不要推测执行者心里“意识到”或“抓住”了什么，也不要为了扣分编造错误。禁用这些措辞：{'、'.join(EVALUATION_DISALLOWED_PHRASES)}。高风险公共片段同样禁用：{'、'.join(EVALUATION_HIGH_RISK_FRAGMENTS)}。描述只写事实和影响，不能写“因此推理能力评为 4 分”“所以保持 3 分”“没有达到 5 分条件”等评分结论。不复述分数，不提评分工具、内部提示或生成过程。只评价当前轮次完成的内容。"""
+EVALUATION_DESCRIPTION_GUIDANCE = EVALUATION_DESCRIPTION_GUIDANCE.replace(
+    "五维描述只能使用当前轮次轨迹、Git 变化和验收结果中真实存在的事实；",
+    "五维描述只能使用当前轮次轨迹中真实存在的事实；",
+)
 EVALUATION_DESCRIPTION_GUIDANCE += """ 环境、网络、权限、系统解释器、包管理器或系统运行库问题只能写入 other_issues，不能出现在任何非满分维度中作为扣分理由。遇到这类阻碍后完成适配属于恢复事实，不是能力缺点；删除环境扣分后必须重新按评分表定档，不能因为没有找到另一条扣分依据就自动升为 5 分。确有错误操作时只描述错误动作和它造成的后果，不把环境故障本身写成不足。"""
+EVALUATION_DESCRIPTION_GUIDANCE += """ 更严格的事实边界：五维描述只能引用当前轮次对应的 turn-XX.jsonl 中实际出现的内容。后续轮次、数据库中的 Git 字段、独立代码复核以及轨迹外的验收结果只能辅助判断分数，不能写进描述。描述中的数字、文件名、函数名、接口、命令、报错、成功或失败状态都必须能在该轮轨迹中找到；不得把 Vite 构建写成容器镜像构建，也不得把数据库提交号写成该轮执行过的 Git 操作。"""
+EVALUATION_DESCRIPTION_GUIDANCE += """ 不要套用历史提交里的整句或固定收尾；即使事实相近，也要用当前项目的业务对象、文件和实际动作重新表达。提交前会与本地已质检通过的描述核对公共长片段。"""
 EVALUATION_RUBRIC_START = "第三步：打分并撰写反馈"
 EVALUATION_RUBRIC_END = "第四步：提交数据"
 EVALUATION_SCORE_GUIDANCE = """严格使用下方评分表的 1～5 分制，对五个维度分别独立定档，不得改用十分制、百分制或自行换算。先从本轮轨迹提取正向证据和负向证据，再判断最匹配档位，不能从 5 分开始倒扣，也不能为了拉开分差编造不足。最终检查通过、没有剩余 Bug 或 next_action=complete 只能证明最终状态，不能单独证明任何维度达到 5 分；反过来，没有发现扣分点也不能直接判满分，仍要有材料正向证明该维度的满分条件。
@@ -972,6 +1034,13 @@ def initialize_database() -> None:
               result TEXT,
               verification TEXT NOT NULL DEFAULT '[]',
               review_result TEXT,
+              evaluation_candidate TEXT,
+              validated_evaluation TEXT,
+              evaluation_evidence TEXT NOT NULL DEFAULT '{}',
+              evaluation_status TEXT NOT NULL DEFAULT 'legacy',
+              evaluation_schema_version INTEGER NOT NULL DEFAULT 1,
+              evaluation_warning TEXT,
+              evaluation_validated_at TEXT,
               manual_evaluation TEXT,
               manual_evaluation_updated_at TEXT,
               commit_sha TEXT,
@@ -1025,6 +1094,14 @@ def initialize_database() -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS solo_qa_remote_submission_id_uq
               ON solo_qa_submissions(remote_submission_id)
               WHERE remote_submission_id IS NOT NULL AND remote_submission_id != '';
+            CREATE TABLE IF NOT EXISTS evaluation_risk_fragments (
+              normalized_fragment TEXT PRIMARY KEY,
+              fragment TEXT NOT NULL,
+              source TEXT NOT NULL DEFAULT 'solo_qa_b5',
+              source_submission_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             """
         )
         columns = {row["name"] for row in database.execute("PRAGMA table_info(runs)")}
@@ -1125,17 +1202,27 @@ def initialize_database() -> None:
         turn_columns = {
             row["name"] for row in database.execute("PRAGMA table_info(run_turns)")
         }
-        for column in (
-            "commit_sha",
-            "trajectory_path",
-            "trajectory_sha256",
-            "checkpointed_at",
-            "export_deleted_at",
-            "manual_evaluation",
-            "manual_evaluation_updated_at",
-        ):
+        turn_column_definitions = {
+            "commit_sha": "TEXT",
+            "trajectory_path": "TEXT",
+            "trajectory_sha256": "TEXT",
+            "checkpointed_at": "TEXT",
+            "export_deleted_at": "TEXT",
+            "manual_evaluation": "TEXT",
+            "manual_evaluation_updated_at": "TEXT",
+            "evaluation_candidate": "TEXT",
+            "validated_evaluation": "TEXT",
+            "evaluation_evidence": "TEXT NOT NULL DEFAULT '{}'",
+            "evaluation_status": "TEXT NOT NULL DEFAULT 'legacy'",
+            "evaluation_schema_version": "INTEGER NOT NULL DEFAULT 1",
+            "evaluation_warning": "TEXT",
+            "evaluation_validated_at": "TEXT",
+        }
+        for column, definition in turn_column_definitions.items():
             if column not in turn_columns:
-                database.execute(f"ALTER TABLE run_turns ADD COLUMN {column} TEXT")
+                database.execute(
+                    f"ALTER TABLE run_turns ADD COLUMN {column} {definition}"
+                )
         legacy_rows = database.execute(
             """SELECT id, first_prompt, task_type, language_framework FROM runs
                WHERE task_type = '未记录' OR language_framework = '未记录'"""
@@ -1240,6 +1327,17 @@ def initialize_database() -> None:
                    WHERE runs.id = run_turns.run_id AND runs.phase IN ('stopped', 'interrupted', 'failed')
                  )"""
         )
+        for rejected in database.execute(
+            """SELECT remote_submission_id, qc_summary
+                 FROM solo_qa_submissions
+                WHERE qc_summary LIKE '%B-5%'
+                   OR qc_summary LIKE '%公共长片段%'"""
+        ).fetchall():
+            learn_remote_b5_fragments(
+                database,
+                rejected["qc_summary"],
+                rejected["remote_submission_id"],
+            )
 
 
 def normalize_iteration_job(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -2971,6 +3069,22 @@ def record_auto_refill_candidate_skip(detail: str) -> None:
             }
         )
     AUTO_REFILL_WAKE.set()
+
+
+def task_generation_candidate_quality_failure(detail: Any) -> bool:
+    """Separate rejected task content from infrastructure/task-run failures."""
+    message = re.sub(r"\s+", " ", str(detail or "")).strip().casefold()
+    quality_prefixes = (
+        f"连续 {TASK_GENERATION_BATCH_ATTEMPTS} 批未生成合规题目".casefold(),
+        "候选复核与一次定向改写后仍不合规".casefold(),
+    )
+    infrastructure_markers = (
+        "超时", "api error", "认证", "鉴权", "连接失败", "请求失败",
+        "模型调用失败", "无响应", "限流", "upstream", "http 5",
+    )
+    return message.startswith(quality_prefixes) and not any(
+        marker in message for marker in infrastructure_markers
+    )
 
 
 def category_for_project_number(project_number: int) -> str:
@@ -5848,6 +5962,114 @@ def transcript_excerpt(session_id: str, prompt_id: Optional[str], max_chars: int
     return transcript_excerpt_from_path(path, prompt_id, max_chars)
 
 
+def turn_trajectory_evidence_events(
+    path: Path,
+    prompt_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Parse one immutable turn into canonical evidence events.
+
+    Both review prompting and export validation consume this parser so they
+    cannot disagree about turn boundaries or JSON escaping.  The source file
+    is opened read-only and is never rewritten.
+    """
+    evidence: List[Dict[str, Any]] = []
+    started = prompt_id is None
+    with path.open("r", encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            event_type = str(event.get("type") or "")
+            message = event.get("message") if isinstance(event.get("message"), dict) else {}
+            content = message.get("content")
+            event_prompt_id = str(event.get("promptId") or "")
+            if event_type == "user" and isinstance(content, str):
+                human_text = trace_human_prompt_text(event)
+                if human_text is None:
+                    continue
+                if not started:
+                    if prompt_id and event_prompt_id == prompt_id:
+                        started = True
+                    else:
+                        continue
+                elif prompt_id and event_prompt_id and event_prompt_id != prompt_id:
+                    break
+                evidence.append({
+                    "event_id": f"E{line_number:06d}-0",
+                    "kind": "user_prompt",
+                    "prompt_id": event_prompt_id,
+                    "text": human_text,
+                })
+                continue
+            if not started or not isinstance(content, list):
+                continue
+            for block_index, block in enumerate(content, 1):
+                if not isinstance(block, dict):
+                    continue
+                event_id = f"E{line_number:06d}-{block_index}"
+                block_type = str(block.get("type") or "")
+                if event_type == "assistant" and block_type == "text":
+                    evidence.append({
+                        "event_id": event_id,
+                        "kind": "assistant_text",
+                        "text": str(block.get("text") or ""),
+                    })
+                elif event_type == "assistant" and block_type == "tool_use":
+                    tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    raw_command = str(
+                        tool_input.get("command") or tool_input.get("cmd") or ""
+                    )
+                    evidence.append({
+                        "event_id": event_id,
+                        "kind": "tool_call",
+                        "tool": str(block.get("name") or "-"),
+                        "input": tool_input,
+                        "raw_command": raw_command,
+                    })
+                elif event_type == "user" and block_type == "tool_result":
+                    result_content = block.get("content")
+                    if isinstance(result_content, list):
+                        result_content = json.dumps(result_content, ensure_ascii=False)
+                    evidence.append({
+                        "event_id": event_id,
+                        "kind": "tool_result",
+                        "text": str(result_content or ""),
+                    })
+    return evidence
+
+
+def render_grounding_evidence(events: List[Dict[str, Any]]) -> str:
+    """Render the objective subset used by prompts and strict validators."""
+    entries: List[str] = []
+    for event in events:
+        kind = str(event.get("kind") or "")
+        event_id = str(event.get("event_id") or "-")
+        if kind == "assistant_text":
+            # Narrative can inform reasoning review in the full transcript, but
+            # it cannot alone prove objective names, numbers, commands or output.
+            continue
+        entries.append(f"EVIDENCE[{event_id}]")
+        if kind == "user_prompt":
+            entries.append(
+                f"USER[{event.get('prompt_id') or '-'}]: {event.get('text') or ''}"
+            )
+        elif kind == "tool_call":
+            tool_input = json.dumps(event.get("input") or {}, ensure_ascii=False)
+            entries.append(f"TOOL {event.get('tool') or '-'}: {tool_input}")
+            raw_command = str(event.get("raw_command") or "")
+            if raw_command:
+                # Keep the parsed command as an unescaped evidence line.  This
+                # avoids false negatives for quoted shell fragments while the
+                # JSON tool record remains available to command parsers.
+                entries.append(f"RAW COMMAND: {raw_command}")
+        elif kind == "tool_result":
+            entries.append(f"TOOL RESULT: {event.get('text') or ''}")
+    return "\n".join(entries)
+
+
 def transcript_excerpt_from_path(
     path: Path,
     prompt_id: Optional[str],
@@ -5855,54 +6077,28 @@ def transcript_excerpt_from_path(
 ) -> str:
     entries: List[str] = []
     tool_ledger: List[str] = []
-    started = prompt_id is None
     try:
-        with path.open("r", encoding="utf-8") as source:
-            for line in source:
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                event_type = str(event.get("type") or "")
-                message = event.get("message") if isinstance(event.get("message"), dict) else {}
-                content = message.get("content")
-                event_prompt_id = str(event.get("promptId") or "")
-                if event_type == "user" and isinstance(content, str):
-                    human_text = trace_human_prompt_text(event)
-                    if human_text is None:
-                        continue
-                    content = human_text
-                    if not started:
-                        if prompt_id and event_prompt_id == prompt_id:
-                            started = True
-                        else:
-                            continue
-                    elif prompt_id and event_prompt_id and event_prompt_id != prompt_id:
-                        break
-                    entries.append(f"USER[{event_prompt_id or '-'}]: {content[:8000]}")
-                    continue
-                if not started or not isinstance(content, list):
-                    continue
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    block_type = str(block.get("type") or "")
-                    if event_type == "assistant" and block_type == "text":
-                        entries.append(f"ASSISTANT: {str(block.get('text') or '')[:8000]}")
-                    elif event_type == "assistant" and block_type == "tool_use":
-                        tool_input = json.dumps(block.get("input") or {}, ensure_ascii=False)
-                        tool_name = str(block.get("name") or "-")
-                        entries.append(f"TOOL {tool_name}: {tool_input[:8000]}")
-                        tool_ledger.append(f"CALL {tool_name}: {tool_input[:1200]}")
-                    elif event_type == "user" and block_type == "tool_result":
-                        result_content = block.get("content")
-                        if isinstance(result_content, list):
-                            result_content = json.dumps(result_content, ensure_ascii=False)
-                        compact_result = str(result_content or "")
-                        entries.append(f"TOOL RESULT: {compact_result[:8000]}")
-                        tool_ledger.append(f"RESULT: {compact_result[:1200]}")
+        events = turn_trajectory_evidence_events(path, prompt_id)
     except OSError:
         return "轨迹文件读取失败"
+    for event in events:
+        kind = str(event.get("kind") or "")
+        if kind == "user_prompt":
+            entries.append(
+                f"USER[{event.get('prompt_id') or '-'}]: "
+                f"{str(event.get('text') or '')[:8000]}"
+            )
+        elif kind == "assistant_text":
+            entries.append(f"ASSISTANT: {str(event.get('text') or '')[:8000]}")
+        elif kind == "tool_call":
+            tool_input = json.dumps(event.get("input") or {}, ensure_ascii=False)
+            tool_name = str(event.get("tool") or "-")
+            entries.append(f"TOOL {tool_name}: {tool_input[:8000]}")
+            tool_ledger.append(f"CALL {tool_name}: {tool_input[:1200]}")
+        elif kind == "tool_result":
+            compact_result = str(event.get("text") or "")
+            entries.append(f"TOOL RESULT: {compact_result[:8000]}")
+            tool_ledger.append(f"RESULT: {compact_result[:1200]}")
     text = "\n".join(entries)
     if len(text) <= max_chars:
         return text or "轨迹中没有可读取的对话和工具调用"
@@ -5925,6 +6121,24 @@ def transcript_excerpt_from_path(
         "...原始叙述尾部...\n"
         f"{text[-tail_size:] if tail_size else ''}"
     )[:max_chars]
+
+
+def trajectory_grounding_text_from_path(
+    path: Path,
+    prompt_id: Optional[str],
+) -> str:
+    """Return untruncated, current-turn-only evidence for description checks."""
+    try:
+        events = turn_trajectory_evidence_events(path, prompt_id)
+    except OSError:
+        return ""
+    return render_grounding_evidence(events)
+
+
+def completed_turn_trajectory_path(row: Dict[str, Any]) -> Optional[Path]:
+    """Use only the saved per-turn trace; never fall back to a session trace."""
+    value = str(row.get("turn_trajectory_path") or "").strip()
+    return Path(value).expanduser() if value else None
 
 
 def read_timeline(agent_id: str) -> Dict[str, Any]:
@@ -6029,6 +6243,9 @@ def update_turn(run_id: str, turn_number: int, **fields: Any) -> None:
         "intent_type", "prompt", "model", "agent_id", "prompt_id", "result",
         "verification", "review_result", "commit_sha", "trajectory_path",
         "trajectory_sha256", "checkpointed_at", "status",
+        "evaluation_candidate", "validated_evaluation", "evaluation_evidence",
+        "evaluation_status", "evaluation_schema_version", "evaluation_warning",
+        "evaluation_validated_at",
     }
     unknown = set(fields) - allowed
     if unknown:
@@ -6239,7 +6456,14 @@ def serialize_run(row: sqlite3.Row, include_events: bool = True) -> Dict[str, An
     turns: List[Dict[str, Any]] = []
     for turn_row_item in turn_rows:
         turn = dict(turn_row_item)
-        for key, fallback in (("verification", []), ("review_result", {})):
+        for key, fallback in (
+            ("verification", []),
+            ("review_result", {}),
+            ("evaluation_candidate", {}),
+            ("validated_evaluation", {}),
+            ("evaluation_evidence", {}),
+            ("manual_evaluation", {}),
+        ):
             try:
                 turn[key] = json.loads(turn.get(key) or ("[]" if isinstance(fallback, list) else "{}"))
             except json.JSONDecodeError:
@@ -6372,6 +6596,13 @@ def completed_turn_rows() -> List[Dict[str, Any]]:
                  turns.prompt_id AS turn_prompt_id,
                  turns.result AS turn_result,
                  turns.review_result AS turn_review_result,
+                 turns.evaluation_candidate AS turn_evaluation_candidate,
+                 turns.validated_evaluation AS turn_validated_evaluation,
+                 turns.evaluation_evidence AS turn_evaluation_evidence,
+                 turns.evaluation_status AS turn_evaluation_status,
+                 turns.evaluation_schema_version AS turn_evaluation_schema_version,
+                 turns.evaluation_warning AS turn_evaluation_warning,
+                 turns.evaluation_validated_at AS turn_evaluation_validated_at,
                  turns.verification AS turn_verification,
                  turns.manual_evaluation AS turn_manual_evaluation,
                  turns.manual_evaluation_updated_at AS turn_manual_evaluation_updated_at,
@@ -6419,6 +6650,335 @@ EVALUATION_DIMENSION_KEYS = (
     "reasoning",
     "execution",
 )
+EVALUATION_DIMENSION_LABELS = {
+    "delivery": "交付完整性",
+    "instruction_following": "指令遵循",
+    "planning": "任务规划",
+    "reasoning": "推理能力",
+    "execution": "执行能力",
+}
+EVALUATION_HISTORY_CACHE_LOCK = threading.Lock()
+EVALUATION_HISTORY_CACHE: Dict[str, Any] = {
+    "signature": None,
+    "entries": [],
+    "risk_fragments": [],
+}
+EVALUATION_SIMILARITY_RESULT_CACHE: Dict[Tuple[Any, ...], Tuple[List[str], List[str]]] = {}
+
+
+def evaluation_similarity_profile(value: Any) -> Tuple[Tuple[str, ...], str]:
+    """Keep prose while removing evidence tokens that should legitimately repeat."""
+    source = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    source = re.sub(r"`[^`\r\n]*`", "|", source)
+    source = re.sub(r"https?://\S+", "|", source)
+    source = EVALUATION_COMMAND_REFERENCE_RE.sub("|", source)
+    source = EVALUATION_FILE_NAME_RE.sub("|", source)
+    source = EVALUATION_API_ROUTE_RE.sub("|", source)
+    source = EVALUATION_FUNCTION_REFERENCE_RE.sub("|", source)
+    source = re.sub(
+        r"第\s*[0-9一二两三四五六七八九十百]+\s*"
+        r"(?:轮|步|次(?:工具)?调用|个?阶段)",
+        "|",
+        source,
+    )
+    source = re.sub(r"(?:本轮|这一轮|当前轮次)", "|", source)
+    source = re.sub(r"[a-z0-9_.:+-]+", "|", source)
+    segments = tuple(
+        segment
+        for segment in (
+            "".join(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]+", part))
+            for part in source.split("|")
+        )
+        if len(segment) >= 4
+    )
+    return segments, "".join(segments)
+
+
+def evaluation_longest_common_prose(
+    left_segments: Iterable[str], right_segments: Iterable[str]
+) -> str:
+    best = ""
+    for left in left_segments:
+        for right in right_segments:
+            match = difflib.SequenceMatcher(
+                None, left, right, autojunk=False
+            ).find_longest_match()
+            if match.size > len(best):
+                best = left[match.a : match.a + match.size]
+    return best
+
+
+def evaluation_character_ngrams(value: str, size: int = 4) -> set[str]:
+    if len(value) < size:
+        return set()
+    return {value[index : index + size] for index in range(len(value) - size + 1)}
+
+
+def _evaluation_history_signature() -> Tuple[Any, ...]:
+    signature: List[Any] = [str(DB_PATH)]
+    for path in (DB_PATH, Path(f"{DB_PATH}-wal")):
+        try:
+            stat = path.stat()
+        except OSError:
+            signature.extend((0, 0))
+        else:
+            signature.extend((stat.st_mtime_ns, stat.st_size))
+    return tuple(signature)
+
+
+def _stored_history_evaluation(row: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        schema_version = int(row.get("evaluation_schema_version") or 1)
+    except (TypeError, ValueError):
+        schema_version = 1
+    automatic: Dict[str, Any] = {}
+    if schema_version >= 2:
+        automatic = parsed_evaluation_field(row, "validated_evaluation")
+    if not automatic:
+        try:
+            review = json.loads(row.get("review_result") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            review = {}
+        reviewed = review.get("evaluation") if isinstance(review, dict) else None
+        automatic = reviewed if isinstance(reviewed, dict) else {}
+    manual = parsed_evaluation_field(row, "manual_evaluation")
+    effective = json.loads(json.dumps(automatic, ensure_ascii=False))
+    for key in EVALUATION_DIMENSION_KEYS:
+        if isinstance(manual.get(key), dict):
+            effective[key] = dict(manual[key])
+    return effective
+
+
+def accepted_evaluation_history() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Return cached QC-passed descriptions and learned remote B-5 fragments."""
+    signature = _evaluation_history_signature()
+    with EVALUATION_HISTORY_CACHE_LOCK:
+        if EVALUATION_HISTORY_CACHE["signature"] == signature:
+            return (
+                list(EVALUATION_HISTORY_CACHE["entries"]),
+                list(EVALUATION_HISTORY_CACHE["risk_fragments"]),
+            )
+        with db_connection() as database:
+            rows = database.execute(
+                """SELECT turns.run_id, turns.turn_number, turns.review_result,
+                          turns.validated_evaluation, turns.evaluation_schema_version,
+                          turns.manual_evaluation, runs.repo_name,
+                          solo.remote_submission_id
+                     FROM solo_qa_submissions AS solo
+                     JOIN run_turns AS turns
+                       ON turns.run_id = solo.run_id
+                      AND turns.turn_number = solo.turn_number
+                     JOIN runs ON runs.id = turns.run_id
+                    WHERE solo.remote_status = 'QC_PASSED'
+                      AND turns.status = 'complete'"""
+            ).fetchall()
+            try:
+                risk_rows = database.execute(
+                    """SELECT fragment, normalized_fragment, source_submission_id
+                         FROM evaluation_risk_fragments
+                        ORDER BY updated_at DESC"""
+                ).fetchall()
+            except sqlite3.OperationalError:
+                risk_rows = []
+        entries: List[Dict[str, Any]] = []
+        for raw_row in rows:
+            row = dict(raw_row)
+            evaluation = _stored_history_evaluation(row)
+            for key in EVALUATION_DIMENSION_KEYS:
+                item = evaluation.get(key)
+                if not isinstance(item, dict):
+                    continue
+                description = str(item.get("description") or "").strip()
+                segments, compact = evaluation_similarity_profile(description)
+                if not compact:
+                    continue
+                entries.append({
+                    "run_id": str(row.get("run_id") or ""),
+                    "turn_number": int(row.get("turn_number") or 0),
+                    "repo_name": str(row.get("repo_name") or ""),
+                    "remote_id": str(row.get("remote_submission_id") or ""),
+                    "dimension": key,
+                    "segments": segments,
+                    "compact": compact,
+                    "hard_ngrams": evaluation_character_ngrams(
+                        compact, EVALUATION_HISTORY_MIN_FRAGMENT_CHARS
+                    ),
+                    "warning_ngrams": evaluation_character_ngrams(compact),
+                })
+        risk_fragments = [dict(row) for row in risk_rows]
+        EVALUATION_HISTORY_CACHE.update({
+            "signature": signature,
+            "entries": entries,
+            "risk_fragments": risk_fragments,
+        })
+        EVALUATION_SIMILARITY_RESULT_CACHE.clear()
+        return list(entries), list(risk_fragments)
+
+
+def evaluation_history_similarity_issues(
+    evaluation: Dict[str, Any],
+    exclude: Optional[Tuple[str, int]] = None,
+) -> Tuple[List[str], List[str]]:
+    """Find hard shared fragments and softer near-duplicate prose warnings."""
+    hard_issues: List[str] = []
+    warnings: List[str] = []
+    history, risk_fragments = accepted_evaluation_history()
+    cache_key = (
+        _evaluation_history_signature(),
+        (str(exclude[0]), int(exclude[1])) if exclude else None,
+        tuple(
+            str((evaluation.get(key) or {}).get("description") or "")
+            if isinstance(evaluation.get(key), dict)
+            else ""
+            for key in EVALUATION_DIMENSION_KEYS
+        ),
+    )
+    with EVALUATION_HISTORY_CACHE_LOCK:
+        cached = EVALUATION_SIMILARITY_RESULT_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached[0]), list(cached[1])
+    for key in EVALUATION_DIMENSION_KEYS:
+        item = evaluation.get(key)
+        if not isinstance(item, dict):
+            continue
+        segments, compact = evaluation_similarity_profile(item.get("description"))
+        if not compact:
+            continue
+        label = EVALUATION_DIMENSION_LABELS[key]
+        learned_hit = ""
+        learned_source = ""
+        for learned in risk_fragments:
+            fragment_segments, fragment_compact = evaluation_similarity_profile(
+                learned.get("fragment")
+            )
+            if (
+                len(fragment_compact) >= 10
+                and fragment_compact in compact
+            ):
+                learned_hit = fragment_compact
+                learned_source = str(learned.get("source_submission_id") or "")
+                break
+        if learned_hit:
+            source_text = f"（来源 #{learned_source}）" if learned_source else ""
+            hard_issues.append(
+                f"{label}描述命中远端 B-5 高风险片段{source_text}："
+                f"“{learned_hit}”"
+            )
+            continue
+        current_ngrams = evaluation_character_ngrams(compact)
+        current_hard_ngrams = evaluation_character_ngrams(
+            compact, EVALUATION_HISTORY_MIN_FRAGMENT_CHARS
+        )
+        best_warning: Optional[Tuple[float, Dict[str, Any]]] = None
+        for old in history:
+            if old["dimension"] != key:
+                continue
+            if exclude and (
+                old["run_id"], int(old["turn_number"])
+            ) == (str(exclude[0]), int(exclude[1])):
+                continue
+            source = f"#{old['remote_id']}" if old["remote_id"] else old["repo_name"]
+            if current_hard_ngrams & old["hard_ngrams"]:
+                shared = evaluation_longest_common_prose(segments, old["segments"])
+                if len(shared) >= EVALUATION_HISTORY_MIN_FRAGMENT_CHARS:
+                    hard_issues.append(
+                        f"{label}描述与本地已质检通过记录 {source} "
+                        f"存在公共长片段：“{shared}”"
+                    )
+                    break
+            if (
+                min(len(compact), len(old["compact"]))
+                < EVALUATION_HISTORY_WARNING_MIN_CHARS
+            ):
+                continue
+            old_ngrams = old["warning_ngrams"]
+            union = current_ngrams | old_ngrams
+            ratio = len(current_ngrams & old_ngrams) / len(union) if union else 0.0
+            if ratio >= EVALUATION_HISTORY_WARNING_RATIO and (
+                best_warning is None or ratio > best_warning[0]
+            ):
+                best_warning = (ratio, old)
+        else:
+            if best_warning:
+                ratio, old = best_warning
+                source = f"#{old['remote_id']}" if old["remote_id"] else old["repo_name"]
+                warnings.append(
+                    f"{label}描述与本地已质检通过记录 {source} 的整体写法较相似"
+                    f"（{ratio:.0%}），建议改成当前轨迹里的具体表达"
+                )
+    result = (
+        list(dict.fromkeys(hard_issues)),
+        list(dict.fromkeys(warnings)),
+    )
+    with EVALUATION_HISTORY_CACHE_LOCK:
+        if len(EVALUATION_SIMILARITY_RESULT_CACHE) >= 2048:
+            EVALUATION_SIMILARITY_RESULT_CACHE.clear()
+        EVALUATION_SIMILARITY_RESULT_CACHE[cache_key] = result
+    return list(result[0]), list(result[1])
+
+
+def extract_remote_b5_fragments(value: Any) -> List[str]:
+    """Extract the copied phrase when SOLO-QA returns a B-5 duplicate rejection."""
+    source = unicodedata.normalize("NFKC", str(value or ""))
+    if not any(marker in source for marker in ("B-5", "公共长片段", "查重命中证据")):
+        return []
+    candidates: List[str] = []
+    patterns = (
+        r"原文依据[：:]\s*[「“\"]([^」”\"\r\n]{8,120})[」”\"]",
+        r"公共(?:长)?片段[：:]\s*[「“\"]([^」”\"\r\n]{8,120})[」”\"]",
+        r"复制\s*[\r\n]+\s*([^\r\n]{8,120})",
+    )
+    for pattern in patterns:
+        candidates.extend(re.findall(pattern, source, flags=re.I))
+    fragments: List[str] = []
+    for candidate in candidates:
+        candidate = re.sub(r"\s+", " ", candidate).strip(" `#*，,。；;：:")
+        segments, compact = evaluation_similarity_profile(candidate)
+        if len(compact) < 10 or len(compact) > 80:
+            continue
+        if any(
+            marker in compact
+            for marker in ("本次提交本维度打分", "历史池对方打分", "任务规划描述")
+        ):
+            continue
+        display = max(segments, key=len) if segments else compact
+        if len(display) >= 10:
+            fragments.append(display)
+    return list(dict.fromkeys(fragments))
+
+
+def learn_remote_b5_fragments(
+    database: sqlite3.Connection,
+    qc_summary: Any,
+    remote_submission_id: Any,
+) -> int:
+    fragments = extract_remote_b5_fragments(qc_summary)
+    if not fragments:
+        return 0
+    timestamp = now_text()
+    for fragment in fragments:
+        _, normalized = evaluation_similarity_profile(fragment)
+        database.execute(
+            """INSERT INTO evaluation_risk_fragments(
+                 normalized_fragment, fragment, source, source_submission_id,
+                 created_at, updated_at
+               ) VALUES (?, ?, 'solo_qa_b5', ?, ?, ?)
+               ON CONFLICT(normalized_fragment) DO UPDATE SET
+                 fragment = excluded.fragment,
+                 source_submission_id = COALESCE(
+                   excluded.source_submission_id,
+                   evaluation_risk_fragments.source_submission_id
+                 ),
+                 updated_at = excluded.updated_at""",
+            (
+                normalized,
+                fragment,
+                str(remote_submission_id or "").strip() or None,
+                timestamp,
+                timestamp,
+            ),
+        )
+    return len(fragments)
 
 
 def remove_generic_user_word(value: Any) -> str:
@@ -6432,11 +6992,33 @@ def remove_generic_user_word(value: Any) -> str:
 
 
 def normalize_evaluation_public_wording(value: Any) -> str:
-    """Remove a safely rewritable public phrase without changing its evidence."""
-    return re.sub(r"全部\s*通过", "通过", remove_generic_user_word(value))
+    """Apply only wording rewrites that cannot damage sentence structure."""
+    text = re.sub(r"全部\s*通过", "通过", remove_generic_user_word(value))
+    text = re.sub(r"([。！？])(?:\s*[。！？])+", r"\1", text)
+    text = re.sub(r"^[，,；;。！？\s]+", "", text)
+    return text.strip(" ，,；;")
+
+
+def parsed_evaluation_field(row: Dict[str, Any], field: str) -> Dict[str, Any]:
+    """Read one stored evaluation object without treating malformed JSON as data."""
+    try:
+        evaluation = json.loads(row.get(field) or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return evaluation if isinstance(evaluation, dict) else {}
+
+
+def candidate_turn_evaluation(row: Dict[str, Any]) -> Dict[str, Any]:
+    return parsed_evaluation_field(row, "turn_evaluation_candidate")
 
 
 def automatic_turn_evaluation(row: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        schema_version = int(row.get("turn_evaluation_schema_version") or 1)
+    except (TypeError, ValueError):
+        schema_version = 1
+    if schema_version >= 2:
+        return parsed_evaluation_field(row, "turn_validated_evaluation")
     try:
         review = json.loads(row.get("turn_review_result") or "{}")
     except (json.JSONDecodeError, TypeError):
@@ -6457,7 +7039,8 @@ def turn_evaluation(row: Dict[str, Any]) -> Dict[str, Any]:
     """Return the effective evaluation, overlaying saved human score edits."""
     automatic = automatic_turn_evaluation(row)
     manual = turn_manual_evaluation(row)
-    effective = json.loads(json.dumps(automatic, ensure_ascii=False))
+    base = automatic or (candidate_turn_evaluation(row) if manual else {})
+    effective = json.loads(json.dumps(base, ensure_ascii=False))
     if manual:
         for key in EVALUATION_DIMENSION_KEYS:
             item = manual.get(key)
@@ -6470,6 +7053,77 @@ def turn_evaluation(row: Dict[str, Any]) -> Dict[str, Any]:
                 item["description"]
             )
     return effective
+
+
+def evaluation_evidence_reference_map(
+    evaluation: Dict[str, Any],
+    grounding_trajectory: str,
+) -> Dict[str, List[str]]:
+    """Build an audit-only map from each dimension to matching evidence events."""
+    blocks = re.split(r"(?=^EVIDENCE\[)", str(grounding_trajectory or ""), flags=re.M)
+    evidence_blocks: List[Tuple[str, str]] = []
+    for block in blocks:
+        match = re.match(r"EVIDENCE\[([^\]]+)\]", block)
+        if match:
+            evidence_blocks.append((match.group(1), compact_evaluation_evidence(block)))
+    references: Dict[str, List[str]] = {}
+    for key in EVALUATION_DIMENSION_KEYS:
+        item = evaluation.get(key)
+        description = str(item.get("description") or "") if isinstance(item, dict) else ""
+        evidence_tokens: List[str] = []
+        for sentence in evaluation_description_sentences(description):
+            evidence_tokens.extend(evaluation_position_anchors(sentence))
+            sentence_without_turn = re.sub(r"第\s*\d+\s*轮", "", sentence)
+            evidence_tokens.extend(
+                re.findall(
+                    r"(?<![A-Za-z0-9])\d+(?:\.\d+)?(?![A-Za-z0-9])",
+                    sentence_without_turn,
+                )
+            )
+        compact_tokens = [
+            compact_evaluation_evidence(token) for token in evidence_tokens
+        ]
+        references[key] = [
+            event_id
+            for event_id, block in evidence_blocks
+            if any(token and token in block for token in compact_tokens)
+        ]
+    return references
+
+
+def evaluation_publication_fields(
+    result: Dict[str, Any],
+    grounding_trajectory: str,
+    previous_validated: Any = "",
+) -> Dict[str, Any]:
+    """Return atomic storage fields for a candidate or validated scorecard."""
+    warning = re.sub(r"\s+", " ", str(result.get("evaluation_warning") or "")).strip()
+    try:
+        evaluation = preserve_evaluation_for_manual_edit(result.get("evaluation"))
+    except WorkflowError as exc:
+        candidate = result.get("evaluation")
+        evaluation = candidate if isinstance(candidate, dict) else {}
+        warning = warning or str(exc)
+    fields: Dict[str, Any] = {
+        "evaluation_candidate": json.dumps(evaluation, ensure_ascii=False),
+        "evaluation_schema_version": 2,
+        "evaluation_warning": warning or None,
+    }
+    if warning:
+        fields["evaluation_status"] = (
+            "validated_previous" if str(previous_validated or "").strip() else "pending"
+        )
+        return fields
+    fields.update({
+        "validated_evaluation": json.dumps(evaluation, ensure_ascii=False),
+        "evaluation_evidence": json.dumps(
+            evaluation_evidence_reference_map(evaluation, grounding_trajectory),
+            ensure_ascii=False,
+        ),
+        "evaluation_status": "validated",
+        "evaluation_validated_at": now_text(),
+    })
+    return fields
 
 
 def completed_turn_task_type(
@@ -6519,6 +7173,8 @@ def normalize_manual_evaluation(
         if len(description) > 2000:
             raise WorkflowError(f"{labels[key]}描述不能超过 2000 字")
         if enforce_description_policy:
+            if EVALUATION_SCORE_REFERENCE_RE.search(description):
+                raise WorkflowError(f"{labels[key]}描述不能复述分数")
             identity_reference = evaluation_identity_reference(description)
             if identity_reference:
                 raise WorkflowError(
@@ -6546,27 +7202,24 @@ def completed_turn_evaluation_policy_issues(
         )
     except WorkflowError as exc:
         issues.append(str(exc))
-    trajectory_value = str(
-        row.get("turn_trajectory_path") or row.get("run_trajectory_path") or ""
-    ).strip()
-    trajectory_path = Path(trajectory_value).expanduser() if trajectory_value else None
+    trajectory_path = completed_turn_trajectory_path(row)
     if trajectory_path and trajectory_path.is_file():
-        trajectory = transcript_excerpt_from_path(
-            trajectory_path,
-            str(row.get("turn_prompt_id") or "") or None,
-        )
+        prompt_id = str(row.get("turn_prompt_id") or "") or None
+        trajectory = trajectory_grounding_text_from_path(trajectory_path, prompt_id)
         issues.extend(evaluation_trace_command_issues(evaluation, trajectory))
         issues.extend(
             evaluation_trace_grounding_issues(
                 evaluation,
                 trajectory,
-                {
-                    "prompt": str(row.get("turn_prompt") or ""),
-                    "result": str(row.get("turn_result") or ""),
-                    "verification": str(row.get("turn_verification") or ""),
-                },
             )
         )
+    else:
+        issues.append("缺少当前轮次独立轨迹文件")
+    history_issues, _ = evaluation_history_similarity_issues(
+        evaluation,
+        (str(row.get("run_id") or ""), int(row.get("turn_number") or 0)),
+    )
+    issues.extend(history_issues)
     return list(dict.fromkeys(issue for issue in issues if issue))
 
 
@@ -6574,7 +7227,7 @@ def save_completed_turn_evaluation(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Persist or clear a human override without changing the automatic review."""
     turn_key = str(payload.get("turn_key") or "").strip()
     row = completed_turn_row(turn_key)
-    if not automatic_turn_evaluation(row):
+    if not (automatic_turn_evaluation(row) or candidate_turn_evaluation(row)):
         raise WorkflowError("该轮没有可编辑的自动评分")
     reset = payload.get("reset") is True
     timestamp = now_text()
@@ -6643,11 +7296,8 @@ def solo_qa_readiness(
     ).strip()
     if int(row.get("turn_number") or 0) == 1 and difficulty == "简单":
         issues.append("SOLO-QA 首轮不能提交简单难度")
-    trajectory_value = str(
-        row.get("turn_trajectory_path") or row.get("run_trajectory_path") or ""
-    ).strip()
-    if trajectory_value:
-        trajectory_path = Path(trajectory_value).expanduser()
+    trajectory_path = completed_turn_trajectory_path(row)
+    if trajectory_path:
         if trajectory_path.is_file() and trajectory_path.stat().st_size > SOLO_QA_MAX_ATTACHMENT_BYTES:
             issues.append("轨迹文件超过 SOLO-QA 的 20 MB 上限")
     return bool(export_ready) and not issues, issues
@@ -6762,9 +7412,9 @@ def solo_qa_turn_payload(turn_key: str) -> Dict[str, Any]:
     preflight = preflight_completed_turns([turn_key])["results"][0]
     if not preflight["eligible"]:
         raise WorkflowError(f"提交前检查未通过：{'；'.join(preflight['blockers'])}")
-    trajectory_path = Path(
-        str(row.get("turn_trajectory_path") or row.get("run_trajectory_path") or "")
-    ).expanduser()
+    trajectory_path = completed_turn_trajectory_path(row)
+    if trajectory_path is None:
+        raise WorkflowError("缺少当前轮次独立轨迹文件")
     return {
         "key": turn_key,
         "project_number": run_project_number_label(row),
@@ -6789,9 +7439,9 @@ def solo_qa_trajectory_path(run_id: str, turn_number: int) -> Path:
     preflight = preflight_completed_turns([f"{run_id}:{turn_number}"])["results"][0]
     if not preflight["eligible"]:
         raise WorkflowError(f"提交前检查未通过：{'；'.join(preflight['blockers'])}")
-    path = Path(
-        str(row.get("turn_trajectory_path") or row.get("run_trajectory_path") or "")
-    ).expanduser()
+    path = completed_turn_trajectory_path(row)
+    if path is None:
+        raise WorkflowError("缺少当前轮次独立轨迹文件")
     expected = str(row.get("turn_trajectory_sha256") or "").lower()
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
     if actual != expected:
@@ -6876,6 +7526,7 @@ def record_solo_qa_state(payload: Dict[str, Any]) -> Dict[str, Any]:
                     timestamp,
                 ),
             )
+            learn_remote_b5_fragments(database, qc_summary, remote_id)
     except sqlite3.IntegrityError as exc:
         raise WorkflowError("该 SOLO-QA 提交 ID 已关联到其他本地轮次") from exc
     refreshed = completed_turn_row(turn_key)
@@ -6978,6 +7629,7 @@ def sync_solo_qa_submissions(payload: Dict[str, Any]) -> Dict[str, Any]:
                         timestamp,
                     ),
                 )
+                learn_remote_b5_fragments(database, qc_summary, remote_id)
             except sqlite3.IntegrityError:
                 ambiguous += 1
                 continue
@@ -7014,6 +7666,7 @@ def completed_turns() -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for row in completed_turn_rows():
         evaluation = turn_evaluation(row)
+        candidate = candidate_turn_evaluation(row)
         turn_number = int(row["turn_number"])
         fallback_difficulty = (
             row.get("run_task_difficulty") if int(row.get("turn_count") or 0) == 1 else ""
@@ -7022,6 +7675,10 @@ def completed_turns() -> List[Dict[str, Any]]:
         solo_qa_ready, solo_qa_issues = solo_qa_readiness(
             row, export_ready, export_issues
         )
+        _, similarity_warnings = evaluation_history_similarity_issues(
+            evaluation,
+            (str(row.get("run_id") or ""), turn_number),
+        ) if evaluation else ([], [])
         records.append({
             "key": f"{row['run_id']}:{turn_number}",
             "run_id": row["run_id"],
@@ -7031,12 +7688,24 @@ def completed_turns() -> List[Dict[str, Any]]:
             "turn_number": turn_number,
             "prompt": row.get("turn_prompt") or "",
             "task_type": completed_turn_task_type(row, evaluation) or "未记录",
-            "task_difficulty": evaluation.get("task_difficulty") or fallback_difficulty or "未记录",
+            "task_difficulty": evaluation.get("task_difficulty")
+            or candidate.get("task_difficulty")
+            or fallback_difficulty
+            or "未记录",
             "model": row.get("turn_model") or "未记录",
             "completed_at": row.get("turn_updated_at") or "",
-            "evaluation": evaluation,
+            "evaluation": evaluation or None,
+            "evaluation_candidate": candidate or None,
+            "evaluation_status": (
+                "manual"
+                if turn_manual_evaluation(row)
+                else str(row.get("turn_evaluation_status") or "legacy")
+            ),
+            "evaluation_warning": row.get("turn_evaluation_warning") or "",
+            "evaluation_validated_at": row.get("turn_evaluation_validated_at") or "",
             "evaluation_overridden": bool(turn_manual_evaluation(row)),
             "evaluation_override_updated_at": row.get("turn_manual_evaluation_updated_at") or "",
+            "evaluation_similarity_warnings": similarity_warnings,
             "export_ready": export_ready,
             "export_issues": export_issues,
             "solo_qa_ready": solo_qa_ready,
@@ -7138,7 +7807,7 @@ def delivery_export_row(row: Dict[str, Any]) -> List[Any]:
         int(row["turn_number"]),
         row.get("turn_commit_sha") or "",
         row.get("snapshot_url") or "",
-        row.get("turn_trajectory_path") or row.get("run_trajectory_path") or "",
+        row.get("turn_trajectory_path") or "",
         value("environment_reproducibility"),
         "Claude Code",
         normalize_harness_version(row.get("harness_version") or "")
@@ -7170,6 +7839,17 @@ def export_readiness(row: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """Validate evidence fields before a completed turn can enter the workbook."""
     issues: List[str] = []
     evaluation = turn_evaluation(row)
+    candidate = candidate_turn_evaluation(row)
+    evaluation_for_metadata = evaluation or candidate
+    evaluation_status = str(row.get("turn_evaluation_status") or "legacy")
+    evaluation_pending = bool(candidate) and not evaluation and evaluation_status in {
+        "checking", "pending",
+    }
+    if evaluation_pending:
+        warning = str(row.get("turn_evaluation_warning") or "").strip()
+        issues.append(
+            f"自动评分待确认：{warning}" if warning else "自动评分仍在严格校验"
+        )
     if not str(row.get("turn_prompt") or "").strip():
         issues.append("缺少 User Prompt")
     session_id = str(row.get("session_id") or "").strip()
@@ -7187,12 +7867,9 @@ def export_readiness(row: Dict[str, Any]) -> Tuple[bool, List[str]]:
         snapshot_url,
     ):
         issues.append("初始环境快照不是 GitHub Commit 地址")
-    trajectory_value = str(
-        row.get("turn_trajectory_path") or row.get("run_trajectory_path") or ""
-    ).strip()
-    trajectory_path = Path(trajectory_value).expanduser() if trajectory_value else None
+    trajectory_path = completed_turn_trajectory_path(row)
     if not trajectory_path or not trajectory_path.is_file():
-        issues.append("轨迹文件不存在")
+        issues.append("当前轮次独立轨迹文件不存在")
     else:
         expected_digest = str(row.get("turn_trajectory_sha256") or "").strip()
         if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_digest):
@@ -7204,29 +7881,30 @@ def export_readiness(row: Dict[str, Any]) -> Tuple[bool, List[str]]:
         "task_difficulty",
         "language_framework",
     ):
-        if not str(evaluation.get(field) or "").strip():
+        if not str(evaluation_for_metadata.get(field) or "").strip():
             issues.append(f"评分缺少 {field}")
-    if not completed_turn_task_type(row, evaluation):
+    if not completed_turn_task_type(row, evaluation_for_metadata):
         issues.append("缺少任务类型")
-    for field, label in (
-        ("delivery", "交付完整性"),
-        ("instruction_following", "指令遵循"),
-        ("planning", "任务规划"),
-        ("reasoning", "推理能力"),
-        ("execution", "执行能力"),
-    ):
-        dimension = evaluation.get(field)
-        if not isinstance(dimension, dict):
-            issues.append(f"缺少{label}评分")
-            continue
-        try:
-            score = int(dimension.get("score"))
-        except (TypeError, ValueError):
-            score = 0
-        if score not in range(1, 6):
-            issues.append(f"{label}不是 1～5 分")
-        if not str(dimension.get("description") or "").strip():
-            issues.append(f"缺少{label}描述")
+    if not evaluation_pending:
+        for field, label in (
+            ("delivery", "交付完整性"),
+            ("instruction_following", "指令遵循"),
+            ("planning", "任务规划"),
+            ("reasoning", "推理能力"),
+            ("execution", "执行能力"),
+        ):
+            dimension = evaluation.get(field)
+            if not isinstance(dimension, dict):
+                issues.append(f"缺少{label}评分")
+                continue
+            try:
+                score = int(dimension.get("score"))
+            except (TypeError, ValueError):
+                score = 0
+            if score not in range(1, 6):
+                issues.append(f"{label}不是 1～5 分")
+            if not str(dimension.get("description") or "").strip():
+                issues.append(f"缺少{label}描述")
     if evaluation:
         # Revalidate with the concrete turn number so turn-aware wording and
         # consistency checks use the same policy as review generation.
@@ -7312,14 +7990,20 @@ def completed_turn_preflight(row: Dict[str, Any]) -> Dict[str, Any]:
         if message not in warnings:
             warnings.append(message)
 
+    evaluation = turn_evaluation(row)
+    if evaluation:
+        _, similarity_warnings = evaluation_history_similarity_issues(
+            evaluation,
+            (str(row.get("run_id") or ""), int(row.get("turn_number") or 0)),
+        )
+        for message in similarity_warnings:
+            warn(message)
+
     session_id = str(row.get("session_id") or "").strip()
     prompt_id = str(row.get("turn_prompt_id") or "").strip()
     prompt = str(row.get("turn_prompt") or "").rstrip("\r\n")
     turn_number = int(row.get("turn_number") or 0)
-    trajectory_value = str(
-        row.get("turn_trajectory_path") or row.get("run_trajectory_path") or ""
-    ).strip()
-    trajectory_path = Path(trajectory_value).expanduser() if trajectory_value else None
+    trajectory_path = completed_turn_trajectory_path(row)
     raw_value = str(row.get("run_trajectory_path") or "").strip()
     raw_path = Path(raw_value).expanduser() if raw_value else None
     checks = {
@@ -7945,6 +8629,11 @@ TERMINAL_ATTENTION_MARKERS = (
 def terminal_attention_reason_from_text(value: Any) -> str:
     visible = TERMINAL_ANSI_ESCAPE_RE.sub("", str(value or "")).replace("\x00", " ")
     visible = re.sub(r"\s+", " ", visible).casefold()
+    # A previous confirmation question can remain in screen scrollback after
+    # the answer was submitted. The current status bar contains this marker
+    # only while Claude is actively running, so do not surface the stale text.
+    if "esc to interrupt" in visible:
+        return ""
     for reason, markers in TERMINAL_ATTENTION_MARKERS:
         if any(marker in visible for marker in markers):
             return reason
@@ -8043,9 +8732,10 @@ if [[ -z "$api_key" ]]; then
   read -r -s "api_key?请输入本次任务的 API Key（输入不显示）："
   printf '\n'
 fi
-docker run -it --init --restart=no --cap-drop ALL --security-opt no-new-privileges --name "$container_name" --mount "type=bind,src=$workspace,dst=/workspace" -e "apikey=$api_key" -e "ANTHROPIC_MODEL=$model" "$image"
+export apikey="$api_key"
+docker run -it --init --restart=no --cap-drop ALL --security-opt no-new-privileges --name "$container_name" --mount "type=bind,src=$workspace,dst=/workspace" -e apikey -e "ANTHROPIC_MODEL=$model" "$image"
 status=$?
-unset api_key
+unset apikey api_key
 printf '%s\n' "$status" > "$exit_status"
 printf '\nClaude 容器已停止，请返回评测控制台查看导出结果。\n'
 exit "$status"
@@ -8214,6 +8904,11 @@ def trace_user_interruption(events: List[Dict[str, Any]], start_index: int) -> s
         ):
             interruption_index = index
             interruption_reason = "Claude 操作被用户中断，当前会话正在等待新的输入"
+        elif interruption_index is not None and re.sub(r"\s+", "", combined).strip():
+            # A later user message (for example the automatic “继续”) resumes
+            # the same conversation even before Claude writes its next event.
+            interruption_index = None
+            interruption_reason = ""
 
     if interruption_index is None:
         return ""
@@ -8734,9 +9429,9 @@ def monitor_docker_turn(run_id: str, turn_number: int) -> None:
             return
 
         now = time.monotonic()
-        visible_attention_reason = terminal_attention_reason_from_text(
-            terminal_screen_text(run_id, str(row["screen_name"] or ""))
-        )
+        screen_name = str(row["screen_name"] or "")
+        visible_terminal = terminal_screen_text(run_id, screen_name)
+        visible_attention_reason = terminal_attention_reason_from_text(visible_terminal)
         if visible_attention_reason:
             if visible_attention_reason != attention_reason:
                 add_event(
@@ -8767,8 +9462,13 @@ def monitor_docker_turn(run_id: str, turn_number: int) -> None:
         if signature and signature != last_activity_signature:
             if inactivity_reported and last_activity_signature is not None:
                 add_event(run_id, "检测到新的轨迹活动，继续监控", "success")
+            first_observation = last_activity_signature is None
             last_activity_signature = signature
-            last_activity_at = now
+            if first_observation:
+                trace_age = max(0.0, time.time() - (signature[2] / 1_000_000_000))
+                last_activity_at = now - min(trace_age, RUN_TIMEOUT_SECONDS)
+            else:
+                last_activity_at = now
             inactivity_reported = False
 
         inactive_seconds = max(0, now - last_activity_at)
@@ -8776,7 +9476,7 @@ def monitor_docker_turn(run_id: str, turn_number: int) -> None:
             if not inactivity_reported:
                 add_event(
                     run_id,
-                    "连续 30 分钟未检测到新轨迹；容器仍在运行，保持只读监控",
+                    "连续 10 分钟未检测到新轨迹；容器仍在运行，继续监控",
                     "warning",
                 )
                 inactivity_reported = True
@@ -9198,6 +9898,65 @@ def run_cancellable_subprocess(
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
+def verification_command_runs_verify_service(command: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:^|\s)docker\s+compose(?:\s+[^\s]+)*\s+run(?:\s+[^\s]+)*\s+verify(?:\s|$)",
+            str(command or "").strip(),
+        )
+    )
+
+
+def verification_command_timeout(command: str) -> int:
+    if verification_command_runs_verify_service(command):
+        return VERIFY_SERVICE_TIMEOUT_SECONDS
+    return VERIFICATION_TIMEOUT_SECONDS
+
+
+def compose_verify_persistence_reason(
+    cwd: Path,
+    environment: Dict[str, str],
+) -> str:
+    """Return why `verify` is a long-running app service, or an empty string."""
+    try:
+        completed = run_cancellable_subprocess(
+            ["docker", "compose", "config", "--format", "json"],
+            cwd,
+            environment,
+            60,
+        )
+    except (WorkflowError, subprocess.TimeoutExpired):
+        return ""
+    if completed.returncode != 0:
+        return ""
+    try:
+        config = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    services = config.get("services") if isinstance(config, dict) else None
+    service = services.get("verify") if isinstance(services, dict) else None
+    if not isinstance(service, dict):
+        return ""
+    restart = str(service.get("restart") or "").strip().casefold()
+    if restart and restart not in {"no", "none", "false"}:
+        return f"verify 服务配置了 restart: {restart}，属于常驻服务"
+    invocation_parts: List[str] = []
+    for key in ("entrypoint", "command"):
+        value = service.get(key)
+        if isinstance(value, list):
+            invocation_parts.extend(str(part) for part in value)
+        elif isinstance(value, str):
+            invocation_parts.append(value)
+    invocation = " ".join(invocation_parts).casefold()
+    server_markers = ("uvicorn", "gunicorn", "nginx", "vite preview", "npm start")
+    test_markers = ("pytest", "vitest", "playwright", "npm test", "verify.py")
+    if any(marker in invocation for marker in server_markers) and not any(
+        marker in invocation for marker in test_markers
+    ):
+        return "verify 服务启动的是常驻 Web 进程，不是一次性验收命令"
+    return ""
+
+
 def verification_results(commands: Iterable[str], cwd: Path, run_id: str) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     environment = verification_environment(run_id)
@@ -9208,12 +9967,26 @@ def verification_results(commands: Iterable[str], cwd: Path, run_id: str) -> Lis
             ensure_job_active()
             uses_compose = uses_compose or command.startswith("docker compose ")
             add_event(run_id, f"验收：{command}（Compose 项目 {project_name}）")
+            if verification_command_runs_verify_service(command):
+                persistence_reason = compose_verify_persistence_reason(cwd, environment)
+                if persistence_reason:
+                    detail = f"{persistence_reason}；已跳过可能无限等待的 docker compose run"
+                    add_event(run_id, detail, "warning")
+                    results.append({
+                        "command": command,
+                        "exit_code": 1,
+                        "output": detail,
+                        "compose_project": project_name,
+                        "failure_kind": "environment",
+                    })
+                    continue
+            timeout = verification_command_timeout(command)
             try:
                 completed = run_cancellable_subprocess(
                     ["/bin/zsh", "-lc", command],
                     cwd,
                     environment,
-                    15 * 60,
+                    timeout,
                 )
                 combined = (completed.stdout + "\n" + completed.stderr).strip()
                 results.append({
@@ -9227,10 +10000,11 @@ def verification_results(commands: Iterable[str], cwd: Path, run_id: str) -> Lis
                     ),
                 })
             except subprocess.TimeoutExpired:
+                timeout_minutes = max(1, timeout // 60)
                 results.append({
                     "command": command,
                     "exit_code": -1,
-                    "output": "执行超过 15 分钟，已停止",
+                    "output": f"执行超过 {timeout_minutes} 分钟，已停止",
                     "compose_project": project_name,
                     "failure_kind": "environment",
                 })
@@ -9670,6 +10444,10 @@ def normalize_evaluation(
                 f"自动检查的 {key} 描述不能出现 AI 身份、工具或模型名称："
                 f"{identity_reference}"
             )
+        if EVALUATION_SCORE_REFERENCE_RE.search(item["description"]):
+            raise WorkflowError(
+                f"自动检查的 {key} 描述不能复述分数"
+            )
         validate_evaluation_score_description_consistency(
             key,
             score,
@@ -9804,12 +10582,50 @@ def chinese_or_decimal_count(value: str) -> Optional[int]:
     }.get(text)
 
 
+def trajectory_has_script_edit_after_failed_run(
+    trajectory: str,
+    script_name: str,
+) -> bool:
+    """Check that a claimed post-failure script correction actually occurred."""
+    blocks = re.split(r"(?=^TOOL (?!RESULT))", str(trajectory or ""), flags=re.M)
+    compact_script = compact_evaluation_evidence(script_name)
+    for index, block in enumerate(blocks):
+        if compact_script not in compact_evaluation_evidence(block):
+            continue
+        if not re.match(r"TOOL\s+(?:Bash|Shell|exec_command|terminal\.exec):", block, re.I):
+            continue
+        if not re.search(
+            r"TOOL RESULT:.{0,12000}(?:failed|error|traceback|失败|报错|"
+            r"exit(?:ed)?\s+(?:with\s+)?(?:code\s+)?[1-9]|did not start)",
+            block,
+            re.I | re.S,
+        ):
+            continue
+        for later in blocks[index + 1:]:
+            if compact_script not in compact_evaluation_evidence(later):
+                continue
+            header = later.splitlines()[0] if later.splitlines() else ""
+            if re.match(r"TOOL\s+(?:Edit|Write|apply_patch):", header, re.I):
+                return True
+            if re.match(r"TOOL\s+(?:Bash|Shell|exec_command|terminal\.exec):", header, re.I):
+                if re.search(
+                    r"(?:\bsed\b|\bperl\b|\bapply_patch\b|"
+                    r"\bpython\b.{0,80}(?:write|replace))",
+                    later,
+                    re.I,
+                ):
+                    return True
+                # A rerun of the same script closes the correction window.
+                break
+    return False
+
+
 def evaluation_trace_grounding_issues(
     evaluation: Dict[str, Any],
     trajectory: str,
     verification: Any = "",
 ) -> List[str]:
-    """Ground negative process claims in existing trace/check output only."""
+    """Ground every score-description fact in the current turn trace only."""
     labels = {
         "delivery": "交付完整性",
         "instruction_following": "指令遵循",
@@ -9818,15 +10634,12 @@ def evaluation_trace_grounding_issues(
         "execution": "执行能力",
     }
     tool_text, result_text, call_lines = trajectory_evaluation_evidence(trajectory)
-    verification_text = (
-        verification
-        if isinstance(verification, str)
-        else json.dumps(verification, ensure_ascii=False)
-    )
-    evidence_text = compact_evaluation_evidence(f"{tool_text}\n{verification_text}")
-    direct_result_text = compact_evaluation_evidence(
-        f"{result_text}\n{verification_text}"
-    )
+    # `verification` remains in the signature for compatibility with older
+    # callers, but it is deliberately excluded. Score descriptions may cite
+    # only the current turn JSONL, not saved summaries or later review output.
+    evidence_text = compact_evaluation_evidence(trajectory)
+    direct_result_text = compact_evaluation_evidence(result_text)
+    shell_records = trace_shell_result_records(trajectory)
     issues: List[str] = []
     for key, label in labels.items():
         item = evaluation.get(key)
@@ -9842,30 +10655,17 @@ def evaluation_trace_grounding_issues(
             next((group for group in match.groups() if group), "")
             for match in EVALUATION_QUOTED_EVIDENCE_RE.finditer(description)
         ]
-        problem_sentences = (
-            description_sentences
-            if score >= 5
-            else [
-                sentence
-                for sentence in description_sentences
-                if (
-                    any(marker in sentence for marker in EVALUATION_PROBLEM_MARKERS)
-                    or EVALUATION_REPEAT_ACTION_RE.search(sentence)
-                    or EVALUATION_CAUSAL_STATE_CLAIM_RE.search(sentence)
-                    or EVALUATION_CAUSAL_HELPER_CLAIM_RE.search(sentence)
-                    or EVALUATION_ARCHITECTURE_CLAIM_RE.search(sentence)
-                )
-            ]
-        )
-        for sentence in problem_sentences:
+        for sentence_index, sentence in enumerate(description_sentences):
             anchors = evaluation_position_anchors(sentence)
-            if anchors and not any(
-                compact_evaluation_evidence(anchor) in evidence_text
+            missing_anchors = [
+                anchor
                 for anchor in anchors
-            ):
+                if compact_evaluation_evidence(anchor) not in evidence_text
+            ]
+            if missing_anchors:
                 issues.append(
-                    f"{label}描述的具体依据无法在本轮轨迹或验收结果中找到："
-                    f"{anchors[0]}"
+                    f"{label}描述的具体依据无法在当前轮次轨迹中找到："
+                    f"{missing_anchors[0]}"
                 )
                 break
 
@@ -9919,10 +10719,97 @@ def evaluation_trace_grounding_issues(
                     if compact_evaluation_evidence(number) not in evidence_text
                 )
                 issues.append(
-                    f"{label}描述中的数量或状态码无法在本轮轨迹、题面或验收结果中找到："
+                    f"{label}描述中的数量或状态码无法在当前轮次轨迹中找到："
                     f"{missing_number}"
                 )
                 break
+
+            if EVALUATION_OBSERVED_OUTPUT_CLAIM_RE.search(sentence):
+                quoted_output = [
+                    quote
+                    for quote in description_quotes
+                    if quote and compact_evaluation_evidence(quote) in direct_result_text
+                ]
+                if not quoted_output:
+                    issues.append(
+                        f"{label}描述中的实际输出声明缺少当前轮次轨迹里的直接工具结果"
+                    )
+                    break
+
+            if EVALUATION_CONTAINER_SUCCESS_CLAIM_RE.search(sentence):
+                docker_success = any(
+                    re.search(r"\b(?:docker|docker-compose)\b", command, re.I)
+                    and not re.search(
+                        r"(?:exit\s*(?:code|status)?\s*[1-9]|failed|error|denied|not found)",
+                        result,
+                        re.I,
+                    )
+                    for command, result in shell_records
+                )
+                if not docker_success:
+                    issues.append(
+                        f"{label}描述中的容器或镜像成功结论没有当前轮次的 Docker/Compose 成功调用支撑"
+                    )
+                    break
+
+            if EVALUATION_GIT_RESULT_CLAIM_RE.search(sentence):
+                git_records = [
+                    (command, result)
+                    for command, result in shell_records
+                    if re.search(r"(?:^|[;&|]\s*|\s)git\s+", command, re.I)
+                ]
+                hashes = re.findall(r"\b[0-9a-f]{7,40}\b", sentence, re.I)
+                if not git_records or any(
+                    compact_evaluation_evidence(commit_hash)
+                    not in compact_evaluation_evidence(
+                        "\n".join(result for _, result in git_records)
+                    )
+                    for commit_hash in hashes
+                ):
+                    issues.append(
+                        f"{label}描述中的 Git 提交或工作树结论无法在当前轮次的 Git 调用中核对"
+                    )
+                    break
+
+            if EVALUATION_POST_FAILURE_SCRIPT_FIX_RE.search(sentence):
+                context_for_script = (
+                    description_sentences[sentence_index - 1]
+                    if sentence_index > 0
+                    else description
+                )
+                context_script_anchors = [
+                    anchor
+                    for anchor in evaluation_position_anchors(context_for_script)
+                    if re.search(r"\.(?:py|sh)$", anchor, re.I)
+                ]
+                script_anchors = context_script_anchors[-1:] or [
+                    anchor
+                    for anchor in evaluation_position_anchors(description)
+                    if re.search(r"\.(?:py|sh)$", anchor, re.I)
+                ]
+                failed_script_anchors = [
+                    anchor
+                    for anchor in script_anchors
+                    if any(
+                        compact_evaluation_evidence(anchor)
+                        in compact_evaluation_evidence(command)
+                        and re.search(
+                            r"(?:failed|error|traceback|失败|报错|"
+                            r"exit(?:ed)?\s+(?:with\s+)?(?:code\s+)?[1-9]|did not start)",
+                            result,
+                            re.I,
+                        )
+                        for command, result in shell_records
+                    )
+                ]
+                if failed_script_anchors and not any(
+                    trajectory_has_script_edit_after_failed_run(trajectory, anchor)
+                    for anchor in failed_script_anchors
+                ):
+                    issues.append(
+                        f"{label}描述称失败后修正了脚本，但当前轮次轨迹没有对应的后续编辑调用"
+                    )
+                    break
 
             if EVALUATION_CAUSAL_STATE_CLAIM_RE.search(sentence):
                 effect_terms = [
@@ -10328,6 +11215,8 @@ def retryable_review_output_error(detail: str) -> bool:
             "描述引用了本轮轨迹中未执行的命令",
             "描述包含模板化措辞",
             "描述包含高风险公共片段",
+            "描述与本地已质检通过记录",
+            "描述命中远端 B-5 高风险片段",
             "执行能力描述不能出现通用命令名称",
             "非满分描述需要至少两个完整句子",
             "非满分描述未写明第",
@@ -10342,6 +11231,7 @@ def retryable_review_output_error(detail: str) -> bool:
             "满分描述包含扣分点",
             "满分描述缺少实际核对或验收依据",
             "描述的具体依据无法在本轮轨迹或验收结果中找到",
+            "描述的具体依据无法在当前轮次轨迹中找到",
             "描述中的数量或状态码无法在本轮轨迹、题面或验收结果中找到",
             "描述声称存在重复或多次操作",
             "描述中的重复次数与本轮轨迹不符",
@@ -10352,6 +11242,7 @@ def retryable_review_output_error(detail: str) -> bool:
             "评分描述定向修正未能收敛",
             "描述包含不易理解的原始数字数组",
             "描述不能出现 AI 身份、工具或模型名称",
+            "描述不能复述分数",
         )
     )
 
@@ -10527,14 +11418,12 @@ def run_codex_evaluation_dimension_repair(
     dimension_label: str,
     turn_number: int,
     validation_error: str,
+    grounding_trajectory: str = "",
 ) -> Dict[str, Any]:
     """Repair one rejected dimension without reopening code review."""
     item = evaluation.get(dimension_key)
     if not isinstance(item, dict):
         raise WorkflowError(f"缺少{dimension_label}评分，无法定向修正描述")
-    verification_text = json.dumps(verification, ensure_ascii=False)
-    if len(verification_text) > 24000:
-        verification_text = verification_text[-24000:]
     final_verification_summary = trajectory_final_verification_summary(trajectory)
     prompt = f"""只修正第 {turn_number} 轮“{dimension_label}”这一项，不改其他四个维度，也不重新判断代码是否通过。现有分数是 {int(item.get('score') or 0)} 分，但不得把它当成默认答案；先重新对照第三步中“{dimension_label}”的 1～5 分条件，再决定保持还是调整。5 分不是删除负面句子后的兜底值，必须由材料正向证明满分条件；材料证明当前维度发生过错误、遗漏、失误或返工时应降低分数，不属于当前维度时不要混写。
 
@@ -10552,11 +11441,11 @@ def run_codex_evaluation_dimension_repair(
 本轮 User Prompt：
 {current_prompt}
 
-本轮验收结果：
-{verification_text}
-
-本轮最后一次检查结果：
+本轮最后一次检查结果（来自当前轮次轨迹）：
 {final_verification_summary}
+
+当前轮允许写进评分描述的客观证据：
+{grounding_trajectory or '当前轮没有可引用的工具证据；不得补写无法核对的数字、名称、命令或结果'}
 
 本轮操作轨迹：
 {trajectory or '未取得轨迹内容'}
@@ -10597,6 +11486,8 @@ def normalize_evaluation_with_targeted_repairs(
     verification: List[Dict[str, Any]],
     trajectory: str,
     repair_notifier: Optional[Callable[[str, str], None]] = None,
+    grounding_trajectory: str = "",
+    history_context: Optional[Tuple[str, int]] = None,
 ) -> Dict[str, Any]:
     """Validate an evaluation and regenerate only a rejected description."""
     if not isinstance(evaluation, dict):
@@ -10604,10 +11495,9 @@ def normalize_evaluation_with_targeted_repairs(
     working = json.loads(json.dumps(evaluation, ensure_ascii=False))
     remove_unverified_evaluation_command_references(working, trajectory)
     attempts_by_dimension: Dict[str, int] = {}
-    # Each of the five dimensions may need three focused rewrites. Keep one
-    # additional pass for validating the final rewrite; otherwise the old
-    # four-pass loop could rewrite the fourth rejected description and then
-    # fail without ever checking the repaired text.
+    last_error_by_dimension: Dict[str, str] = {}
+    # Historical duplicate wording gets up to three focused rewrites. Other
+    # unchanged failures still stop early and move to the non-fatal manual path.
     repairs_per_dimension = 3
     validation_passes = 1 + (
         repairs_per_dimension * len(EVALUATION_DIMENSION_KEYS)
@@ -10615,15 +11505,17 @@ def normalize_evaluation_with_targeted_repairs(
     for _ in range(validation_passes):
         try:
             normalized = normalize_evaluation(working, expected_turn_number)
+            if history_context:
+                history_issues, _ = evaluation_history_similarity_issues(
+                    normalized, history_context
+                )
+                if history_issues:
+                    raise WorkflowError(history_issues[0])
             validate_evaluation_final_verification_consistency(normalized, trajectory)
             validate_evaluation_trace_commands(normalized, trajectory)
             validate_evaluation_trace_grounding(
                 normalized,
-                trajectory,
-                {
-                    "prompt": current_prompt,
-                    "verification": verification,
-                },
+                grounding_trajectory or trajectory,
             )
             return normalized
         except WorkflowError as exc:
@@ -10633,6 +11525,16 @@ def normalize_evaluation_with_targeted_repairs(
             dimension_key, dimension_label = evaluation_dimension_from_error(detail)
             if not dimension_key:
                 raise
+            history_similarity_error = (
+                "本地已质检通过记录" in detail
+                or "远端 B-5 高风险片段" in detail
+            )
+            if (
+                last_error_by_dimension.get(dimension_key) == detail
+                and not history_similarity_error
+            ):
+                raise EvaluationRepairExhausted(detail, working) from exc
+            last_error_by_dimension[dimension_key] = detail
             attempt = attempts_by_dimension.get(dimension_key, 0) + 1
             attempts_by_dimension[dimension_key] = attempt
             if attempt > repairs_per_dimension:
@@ -10649,6 +11551,7 @@ def normalize_evaluation_with_targeted_repairs(
                 dimension_label,
                 expected_turn_number,
                 detail,
+                grounding_trajectory,
             )
             if isinstance(repaired, dict):
                 working[dimension_key]["score"] = int(
@@ -10692,7 +11595,13 @@ def review_evaluation_with_manual_fallback(
     verification: List[Dict[str, Any]],
     trajectory: str,
     repair_notifier: Optional[Callable[[str, str], None]] = None,
+    grounding_trajectory: str = "",
+    history_context: Optional[Tuple[str, int]] = None,
 ) -> Tuple[Dict[str, Any], str]:
+    # A structurally valid scorecard must survive any later wording or
+    # trace-grounding failure. Strict checks decide export readiness; they do
+    # not get to discard scores and descriptions that were already generated.
+    preserved = preserve_evaluation_for_manual_edit(evaluation)
     try:
         return (
             normalize_evaluation_with_targeted_repairs(
@@ -10703,21 +11612,27 @@ def review_evaluation_with_manual_fallback(
                 verification,
                 trajectory,
                 repair_notifier,
+                grounding_trajectory,
+                history_context,
             ),
             "",
         )
     except WorkflowError as exc:
-        if not retryable_review_output_error(str(exc)):
-            raise
-        # Code findings are already available. A remaining prose-format issue
-        # must not discard them or turn a successful development run into a
-        # failed run; export readiness will keep the text blocked until edited.
+        # Code findings are already available. A remaining evaluation-policy
+        # issue must not discard them or turn a successful development run
+        # into a failed run; export readiness keeps the text blocked until it
+        # is corrected. If a targeted rewrite itself produced malformed data,
+        # retain the original structurally valid scorecard instead.
         latest = (
             exc.evaluation
             if isinstance(exc, EvaluationRepairExhausted)
             else evaluation
         )
-        return preserve_evaluation_for_manual_edit(latest), str(exc)
+        try:
+            preserved = preserve_evaluation_for_manual_edit(latest)
+        except WorkflowError:
+            pass
+        return preserved, str(exc)
 
 
 def run_codex_regrade(
@@ -10726,12 +11641,14 @@ def run_codex_regrade(
     verification: List[Dict[str, Any]],
     trajectory: str = "",
     turn_number: int = 1,
+    grounding_trajectory: str = "",
+    history_context: Optional[Tuple[str, int]] = None,
 ) -> Dict[str, Any]:
     verification_text = json.dumps(verification, ensure_ascii=False)
     if len(verification_text) > 24000:
         verification_text = verification_text[-24000:]
     final_verification_summary = trajectory_final_verification_summary(trajectory)
-    prompt = f"""只读检查下面这个已完成轮次，仅重新填写本轮 evaluation，不修改仓库、不生成修复题面，也不沿用旧分数。检查本轮 User Prompt、代码产物、验收结果和完整操作轨迹，以本轮实际表现为唯一依据。本次评分对应第 {turn_number} 轮；所有非满分描述都必须明确写出“第 {turn_number} 轮”。
+    prompt = f"""只读检查下面这个已完成轮次，仅重新填写本轮 evaluation，不修改仓库、不生成修复题面，也不沿用旧分数。检查本轮 User Prompt、代码产物、验收结果和完整操作轨迹，以本轮实际表现为唯一依据。本次评分对应第 {turn_number} 轮；所有非满分描述都必须明确写出“第 {turn_number} 轮”。仓库现状和轨迹外验收可以帮助判断分数，但五维描述中的每个事实只能来自当前轮次轨迹。
 
 {EVALUATION_SCORE_GUIDANCE}
 {EVALUATION_DESCRIPTION_GUIDANCE}
@@ -10752,6 +11669,9 @@ def run_codex_regrade(
 {final_verification_summary}
 {EVALUATION_FINAL_RESULT_GUIDANCE}
 
+本轮评分描述唯一允许引用的客观事实证据：
+{grounding_trajectory or '当前轮没有可引用的工具证据；不得补写无法核对的数字、名称、命令或结果'}
+
 本轮操作轨迹：
 {trajectory or '未取得轨迹内容'}
 """
@@ -10770,6 +11690,8 @@ def run_codex_regrade(
         current_prompt,
         verification,
         trajectory,
+        grounding_trajectory=grounding_trajectory,
+        history_context=history_context,
     )
 
 
@@ -10780,6 +11702,9 @@ def run_codex_review(
     trajectory: str = "",
     repair_prompt_key: str = "",
     evaluation_repair_notifier: Optional[Callable[[str, str], None]] = None,
+    evaluation_draft_notifier: Optional[Callable[[Dict[str, Any]], None]] = None,
+    grounding_trajectory: str = "",
+    history_context: Optional[Tuple[str, int]] = None,
 ) -> Dict[str, Any]:
     schema = {
         "type": "object",
@@ -10802,7 +11727,7 @@ def run_codex_review(
     evaluation_rubric = evaluation_rubric_text()
     prompt = f"""只读检查这个项目的第一轮交付，不得修改文件。完整对照原始需求、仓库实现、Docker 验收结果和 Claude Code 本轮轨迹，检查功能正确性、遗漏、异常路径、持久化、并发、界面交互和 Docker 配置，并在隔离环境中实际执行必要的复现命令。本次评分对应第 1 轮；所有非满分描述都必须明确写出“第 1 轮”。验收项中的 failure_kind=environment 表示端口占用、Docker 守护进程或临时网络等环境失败，不能当成产品 Bug 或模型能力扣分证据；应从仓库和可重复命令继续判断。bugs 只允许记录已经稳定复现且与本轮 User Prompt 验收范围直接相关的业务错误，包括本轮功能自身错误和本轮改动造成的相关回归；仓库中与本轮范围无关的历史问题只能写入 quality_gaps，也不得要求修改相应代码。每条 Bug 都必须分别填写 reproduction、actual、expected、evidence、fix 和 customer_summary，evidence 要包含实际命令、响应、日志或数据库状态。未实际复现的风险、缺少测试、覆盖不足、文档不足和代码结构问题只能写入 quality_gaps，不能进入 bugs，也不能触发修复轮。只有 bugs 非空时 next_action 才能是 bugfix。{BUG_REPAIR_PROMPT_STYLE_GUIDANCE}没有已复现 Bug 时 next_action 必须是 complete 且 bugs 为空；quality_gaps 可以非空，但不得为了增加轮次虚构 Bug。
 
-同时按交付文档对这一轮单独评分。{EVALUATION_SCORE_GUIDANCE} 五个描述都必须结合本轮轨迹和代码给出可核验依据：指出具体步骤、文件、函数或遗漏需求；只有本轮操作轨迹里真实执行过的检查才能作为依据，满分也要说明已核对哪些约束。{EVALUATION_DESCRIPTION_GUIDANCE} {TASK_DIFFICULTY_GUIDANCE} 不提及评分工具、生成过程或内部提示。任务类型按本轮主要意图填写，第一轮从空仓库开发通常是“0-1 代码生成”。语言和框架用英文逗号分隔。环境可复现等级要根据仓库是否真的提供可一键执行的容器环境判断。
+同时按交付文档对这一轮单独评分。{EVALUATION_SCORE_GUIDANCE} 五个描述的事实来源严格限定为第一轮操作轨迹：指出具体步骤、文件、函数或遗漏需求；只有该轮轨迹里真实执行过的检查才能写进描述，不得引用独立复核新跑出的结果或数据库 Git 信息。满分也要说明已核对哪些约束。{EVALUATION_DESCRIPTION_GUIDANCE} {TASK_DIFFICULTY_GUIDANCE} 不提及评分工具、生成过程或内部提示。任务类型按本轮主要意图填写，第一轮从空仓库开发通常是“0-1 代码生成”。语言和框架用英文逗号分隔。环境可复现等级要根据仓库是否真的提供可一键执行的容器环境判断。
 
 本轮必须遵循的五维评分表：
 {evaluation_rubric}
@@ -10817,6 +11742,9 @@ def run_codex_review(
 {final_verification_summary}
 {EVALUATION_FINAL_RESULT_GUIDANCE}
 
+第一轮评分描述唯一允许引用的客观事实证据：
+{grounding_trajectory or '第一轮没有可引用的工具证据；不得补写无法核对的数字、名称、命令或结果'}
+
 第一轮操作轨迹：
 {trajectory or '未取得轨迹内容'}
 """
@@ -10828,6 +11756,12 @@ def run_codex_review(
         45 * 60,
         sandbox="workspace-write",
     )
+    if evaluation_draft_notifier:
+        draft = json.loads(json.dumps(result, ensure_ascii=False))
+        draft["evaluation"] = preserve_evaluation_for_manual_edit(
+            result.get("evaluation")
+        )
+        evaluation_draft_notifier(draft)
     result["summary"] = re.sub(r"\s+", " ", str(result.get("summary") or "")).strip()
     result["bugs"] = normalize_bugs(result.get("bugs"))
     result["quality_gaps"] = normalize_quality_gaps(result.get("quality_gaps"))
@@ -10839,6 +11773,8 @@ def run_codex_review(
         verification,
         trajectory,
         evaluation_repair_notifier,
+        grounding_trajectory,
+        history_context,
     )
     if evaluation_warning:
         result["evaluation_warning"] = evaluation_warning
@@ -10865,6 +11801,9 @@ def run_codex_final_review(
     repair_prompt_key: str = "",
     turn_number: int = 2,
     evaluation_repair_notifier: Optional[Callable[[str, str], None]] = None,
+    evaluation_draft_notifier: Optional[Callable[[Dict[str, Any]], None]] = None,
+    grounding_trajectory: str = "",
+    history_context: Optional[Tuple[str, int]] = None,
 ) -> Dict[str, Any]:
     schema = {
         "type": "object",
@@ -10885,7 +11824,7 @@ def run_codex_final_review(
         verification_text = verification_text[-24000:]
     final_verification_summary = trajectory_final_verification_summary(trajectory)
     evaluation_rubric = evaluation_rubric_text()
-    prompt = f"""只读验收这个项目当前轮次的交付，不得修改文件。当前轮次是一条独立数据，请以本轮 User Prompt 为主要目标，同时结合第一轮原始需求判断回归，并在隔离环境中实际执行必要的复现命令。本次评分对应第 {turn_number} 轮；所有非满分描述都必须明确写出“第 {turn_number} 轮”。验收项中的 failure_kind=environment 表示环境故障，不能当成产品 Bug 或模型能力扣分依据。remaining_bugs 只允许记录已经稳定复现且与当前迭代或修复范围直接相关的业务错误；仓库中与本次范围无关的历史问题只能写入 quality_gaps，也不得要求修改相应代码。每条 Bug 必须分别填写 reproduction、actual、expected、evidence、fix 和 customer_summary，证据包含实际命令、响应、日志或数据库状态。未复现风险、缺少测试、覆盖不足、文档不足和代码结构问题只能写入 quality_gaps，不能触发下一轮。只有 remaining_bugs 非空时 next_action 才能为 bugfix。{BUG_REPAIR_PROMPT_STYLE_GUIDANCE}没有已复现 Bug 时 next_action 必须为 complete 且 remaining_bugs 为空，quality_gaps 可以非空。不得为了延长轮次虚构问题。按交付文档对当前轮次单独填写五维评分，每个描述必须同时关注过程和产物并给出具体依据。{EVALUATION_DESCRIPTION_GUIDANCE} {TASK_DIFFICULTY_GUIDANCE} 若题面主要修复实际问题，任务类型填“Bug 修复”，若题面主要增加新能力，填“Feature 迭代”。语言和框架使用英文逗号分隔，不要在任何描述里提及检查工具或自动生成。
+    prompt = f"""只读验收这个项目当前轮次的交付，不得修改文件。当前轮次是一条独立数据，请以本轮 User Prompt 为主要目标，同时结合第一轮原始需求判断回归，并在隔离环境中实际执行必要的复现命令。本次评分对应第 {turn_number} 轮；所有非满分描述都必须明确写出“第 {turn_number} 轮”。验收项中的 failure_kind=environment 表示环境故障，不能当成产品 Bug 或模型能力扣分依据。remaining_bugs 只允许记录已经稳定复现且与当前迭代或修复范围直接相关的业务错误；仓库中与本次范围无关的历史问题只能写入 quality_gaps，也不得要求修改相应代码。每条 Bug 必须分别填写 reproduction、actual、expected、evidence、fix 和 customer_summary，证据包含实际命令、响应、日志或数据库状态。未复现风险、缺少测试、覆盖不足、文档不足和代码结构问题只能写入 quality_gaps，不能触发下一轮。只有 remaining_bugs 非空时 next_action 才能为 bugfix。{BUG_REPAIR_PROMPT_STYLE_GUIDANCE}没有已复现 Bug 时 next_action 必须为 complete 且 remaining_bugs 为空，quality_gaps 可以非空。不得为了延长轮次虚构问题。按交付文档对当前轮次单独填写五维评分，每个描述必须同时关注过程和产物并给出具体依据。五维描述只允许引用第 {turn_number} 轮操作轨迹中的事实；第一轮轨迹、隔离复核和轨迹外验收可以用于判断分数，但不能写进描述。{EVALUATION_DESCRIPTION_GUIDANCE} {TASK_DIFFICULTY_GUIDANCE} 若题面主要修复实际问题，任务类型填“Bug 修复”，若题面主要增加新能力，填“Feature 迭代”。语言和框架使用英文逗号分隔，不要在任何描述里提及检查工具或自动生成。
 
 严格按以下要求定档：{EVALUATION_SCORE_GUIDANCE}
 
@@ -10905,6 +11844,9 @@ def run_codex_final_review(
 {final_verification_summary}
 {EVALUATION_FINAL_RESULT_GUIDANCE}
 
+当前轮评分描述唯一允许引用的客观事实证据：
+{grounding_trajectory or '当前轮没有可引用的工具证据；不得补写无法核对的数字、名称、命令或结果'}
+
 当前轮次操作轨迹：
 {trajectory or '未取得轨迹内容'}
 """
@@ -10916,6 +11858,12 @@ def run_codex_final_review(
         45 * 60,
         sandbox="workspace-write",
     )
+    if evaluation_draft_notifier:
+        draft = json.loads(json.dumps(result, ensure_ascii=False))
+        draft["evaluation"] = preserve_evaluation_for_manual_edit(
+            result.get("evaluation")
+        )
+        evaluation_draft_notifier(draft)
     result["summary"] = re.sub(r"\s+", " ", str(result.get("summary") or "")).strip()
     result["remaining_bugs"] = normalize_bugs(result.get("remaining_bugs"))
     result["quality_gaps"] = normalize_quality_gaps(result.get("quality_gaps"))
@@ -10927,6 +11875,8 @@ def run_codex_final_review(
         verification,
         trajectory,
         evaluation_repair_notifier,
+        grounding_trajectory,
+        history_context,
     )
     if evaluation_warning:
         result["evaluation_warning"] = evaluation_warning
@@ -11266,12 +12216,15 @@ def review_worker(run_id: str) -> None:
         except json.JSONDecodeError:
             checks = []
         prompt_id = str(row["first_prompt_id"] or "")
-        trajectory_path = Path(str(turn["trajectory_path"] or row["trajectory_path"] or ""))
-        trajectory = (
-            transcript_excerpt_from_path(trajectory_path, prompt_id or None)
-            if trajectory_path.is_file()
-            else transcript_excerpt(str(row["session_id"] or ""), prompt_id or None)
-        )
+        trajectory_path = Path(str(turn["trajectory_path"] or ""))
+        if trajectory_path.is_file():
+            trajectory = transcript_excerpt_from_path(trajectory_path, prompt_id or None)
+            grounding_trajectory = trajectory_grounding_text_from_path(
+                trajectory_path, prompt_id or None
+            )
+        else:
+            trajectory = "未找到当前轮次独立轨迹文件"
+            grounding_trajectory = ""
         def note_evaluation_repair(label: str, detail: str) -> None:
             update_run(
                 run_id,
@@ -11282,6 +12235,24 @@ def review_worker(run_id: str) -> None:
                 f"{label}描述未通过文字规则，只重写该维度；开发和代码复核不重新运行：{detail}",
                 "warning",
             )
+
+        def save_evaluation_draft(draft: Dict[str, Any]) -> None:
+            if str(run_row(run_id)["phase"] or "") != "review_running":
+                return
+            candidate = preserve_evaluation_for_manual_edit(draft["evaluation"])
+            update_turn(
+                run_id,
+                1,
+                evaluation_candidate=json.dumps(candidate, ensure_ascii=False),
+                evaluation_status="checking",
+                evaluation_schema_version=2,
+                evaluation_warning=None,
+            )
+            update_run(
+                run_id,
+                status_detail="评分初稿已保存，正在逐项核对轨迹依据",
+            )
+            add_event(run_id, "评分和描述候选稿已隔离保存，正在进行严格校验")
 
         commit_sha = str(turn["commit_sha"] or "")
         if commit_sha:
@@ -11294,6 +12265,9 @@ def review_worker(run_id: str) -> None:
                     trajectory,
                     repair_prompt_key=f"{run_id}:2",
                     evaluation_repair_notifier=note_evaluation_repair,
+                    evaluation_draft_notifier=save_evaluation_draft,
+                    grounding_trajectory=grounding_trajectory,
+                    history_context=(run_id, 1),
                 )
         else:
             result = run_codex_review(
@@ -11303,15 +12277,24 @@ def review_worker(run_id: str) -> None:
                 trajectory,
                 repair_prompt_key=f"{run_id}:2",
                 evaluation_repair_notifier=note_evaluation_repair,
+                evaluation_draft_notifier=save_evaluation_draft,
+                grounding_trajectory=grounding_trajectory,
+                history_context=(run_id, 1),
             )
         if str(run_row(run_id)["phase"] or "") != "review_running":
             return
         reset_stage_retry(run_id)
+        publication_fields = evaluation_publication_fields(
+            result,
+            grounding_trajectory,
+            turn["validated_evaluation"],
+        )
         update_turn(
             run_id,
             1,
             review_result=json.dumps(result, ensure_ascii=False),
             status="complete",
+            **publication_fields,
         )
         if result.get("evaluation_warning"):
             add_event(
@@ -11446,18 +12429,16 @@ def final_review_worker(run_id: str) -> None:
             checks = json.loads(turn["verification"] or "[]")
         except json.JSONDecodeError:
             checks = []
-        trajectory_path = Path(str(turn["trajectory_path"] or row["trajectory_path"] or ""))
-        trajectory = (
-            transcript_excerpt_from_path(
-                trajectory_path,
-                str(turn["prompt_id"] or "") or None,
+        trajectory_path = Path(str(turn["trajectory_path"] or ""))
+        turn_prompt_id = str(turn["prompt_id"] or "") or None
+        if trajectory_path.is_file():
+            trajectory = transcript_excerpt_from_path(trajectory_path, turn_prompt_id)
+            grounding_trajectory = trajectory_grounding_text_from_path(
+                trajectory_path, turn_prompt_id
             )
-            if trajectory_path.is_file()
-            else transcript_excerpt(
-                str(row["session_id"] or ""),
-                str(turn["prompt_id"] or "") or None,
-            )
-        )
+        else:
+            trajectory = "未找到当前轮次独立轨迹文件"
+            grounding_trajectory = ""
         def note_evaluation_repair(label: str, detail: str) -> None:
             update_run(
                 run_id,
@@ -11467,6 +12448,29 @@ def final_review_worker(run_id: str) -> None:
                 run_id,
                 f"{label}描述未通过文字规则，只重写该维度；开发和代码复核不重新运行：{detail}",
                 "warning",
+            )
+
+        def save_evaluation_draft(draft: Dict[str, Any]) -> None:
+            if str(run_row(run_id)["phase"] or "") != "final_review_running":
+                return
+            candidate = preserve_evaluation_for_manual_edit(draft["evaluation"])
+            update_turn(
+                run_id,
+                turn_number,
+                evaluation_candidate=json.dumps(candidate, ensure_ascii=False),
+                evaluation_status="checking",
+                evaluation_schema_version=2,
+                evaluation_warning=None,
+            )
+            update_run(
+                run_id,
+                status_detail=(
+                    f"第 {turn_number} 轮评分初稿已保存，正在逐项核对轨迹依据"
+                ),
+            )
+            add_event(
+                run_id,
+                f"第 {turn_number} 轮评分和描述候选稿已隔离保存，正在进行严格校验",
             )
 
         commit_sha = str(turn["commit_sha"] or "")
@@ -11485,6 +12489,9 @@ def final_review_worker(run_id: str) -> None:
                     repair_prompt_key=f"{run_id}:{turn_number + 1}",
                     turn_number=turn_number,
                     evaluation_repair_notifier=note_evaluation_repair,
+                    evaluation_draft_notifier=save_evaluation_draft,
+                    grounding_trajectory=grounding_trajectory,
+                    history_context=(run_id, turn_number),
                 )
         else:
             result = run_codex_final_review(
@@ -11496,15 +12503,24 @@ def final_review_worker(run_id: str) -> None:
                 repair_prompt_key=f"{run_id}:{turn_number + 1}",
                 turn_number=turn_number,
                 evaluation_repair_notifier=note_evaluation_repair,
+                evaluation_draft_notifier=save_evaluation_draft,
+                grounding_trajectory=grounding_trajectory,
+                history_context=(run_id, turn_number),
             )
         if str(run_row(run_id)["phase"] or "") != "final_review_running":
             return
         reset_stage_retry(run_id)
+        publication_fields = evaluation_publication_fields(
+            result,
+            grounding_trajectory,
+            turn["validated_evaluation"],
+        )
         update_turn(
             run_id,
             turn_number,
             review_result=json.dumps(result, ensure_ascii=False),
             status="complete",
+            **publication_fields,
         )
         if result.get("evaluation_warning"):
             add_event(
@@ -12015,7 +13031,11 @@ def automatic_generation_worker(run_id: str) -> None:
             )
             add_event(run_id, detail, "error")
             if int(current["auto_refill"] or 0):
-                record_auto_refill_failure(f"{run_id} 的 0-1 题面生成失败：{detail}")
+                failure_detail = f"{run_id} 的 0-1 题面生成失败：{detail}"
+                if task_generation_candidate_quality_failure(detail):
+                    record_auto_refill_candidate_skip(failure_detail)
+                else:
+                    record_auto_refill_failure(failure_detail)
         except Exception:
             pass
         log_workflow_exception(run_id, "task-generation", exc)
@@ -13037,8 +14057,37 @@ def recover_monitors() -> None:
     recover_retryable_review_failures()
 
 
+def cleanup_recovered_verification(run_id: str) -> None:
+    """Stop a Compose verifier orphaned by a previous console process."""
+    row = run_row(run_id)
+    commands = json.loads(row["verification_commands"] or "[]")
+    if not any(str(command).startswith("docker compose ") for command in commands):
+        return
+    workspace = Path(str(row["repo_path"] or ""))
+    if not workspace.is_dir():
+        return
+    environment = verification_environment(run_id)
+    project_name = environment["COMPOSE_PROJECT_NAME"]
+    try:
+        completed = subprocess.run(
+            ["docker", "compose", "-p", project_name, "down", "--remove-orphans"],
+            cwd=str(workspace),
+            text=True,
+            capture_output=True,
+            timeout=120,
+            env=environment,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return
+    if completed.returncode == 0:
+        add_event(run_id, "控制台重启后已清理上一进程遗留的 Compose 验收服务")
+
+
 def _recover_monitor(run_id: str, turn: int) -> None:
     try:
+        row = run_row(run_id)
+        if str(row["phase"] or "") in {"first_idle", "second_idle"}:
+            cleanup_recovered_verification(run_id)
         add_event(run_id, "控制台重启，已恢复容器会话监控", "warning")
         monitor_docker_turn(run_id, turn)
     except Exception as exc:

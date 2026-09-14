@@ -298,6 +298,37 @@ async function recordLocal(bundle, values) {
   }));
 }
 
+function remoteQcText(item) {
+  const parts = [];
+  const seen = new Set();
+  const relevantKey = /(qc|quality|reason|evidence|detail|summary|message|reject|check|查重|质检|打回|证据)/i;
+  const add = (value) => {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    parts.push(text);
+  };
+  add(item?.qc_summary);
+  add(item?.message);
+  const visit = (value, relevant = false, depth = 0) => {
+    if (depth > 5 || value == null) return;
+    if (typeof value === "string") {
+      if (relevant) add(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((entry) => visit(entry, relevant, depth + 1));
+      return;
+    }
+    if (typeof value !== "object") return;
+    Object.entries(value).forEach(([key, entry]) => {
+      visit(entry, relevant || relevantKey.test(key), depth + 1);
+    });
+  };
+  visit(item);
+  return parts.join("\n").slice(0, 4000);
+}
+
 function compactRemote(item) {
   return {
     id: item.id,
@@ -305,7 +336,7 @@ function compactRemote(item) {
     session_id: String(item.session_id || "").slice(0, 128),
     turn_id: String(item.turn_id || "").slice(0, 128),
     round_no: item.round_no || 0,
-    qc_summary: String(item.qc_summary || item.message || "").slice(0, 1000),
+    qc_summary: remoteQcText(item),
     submitted_at: String(item.submitted_at || "").slice(0, 128),
     updated_at: String(item.updated_at || item.qc_finished_at || "").slice(0, 128),
   };
