@@ -31,7 +31,30 @@ def sample_evaluation(task_type="0-1 代码生成"):
     }
 
 
+def sample_repair_difficulty(level="困难"):
+    hard = level in {"困难", "地狱"}
+    return {
+        "level": level,
+        "hard_drivers": ["跨请求事务状态必须保持原子一致"] if hard else [],
+        "human_work_reasons": [
+            "需要同时验证并发提交、失败回滚和既有请求兼容"
+            if hard
+            else "只涉及局部配置或校验顺序修正"
+        ],
+        "inflated_label_risk": False,
+        "one_hour_feasible": True,
+    }
+
+
 class ValidationTests(unittest.TestCase):
+    def test_evaluation_score_total_requires_all_five_dimensions(self):
+        evaluation = sample_evaluation()
+        self.assertEqual(app.evaluation_score_total(evaluation), 25)
+        evaluation["delivery"]["score"] = 1
+        self.assertEqual(app.evaluation_score_total(evaluation), 21)
+        del evaluation["execution"]
+        self.assertIsNone(app.evaluation_score_total(evaluation))
+
     def test_history_similarity_ignores_evidence_tokens_but_finds_shared_prose(self):
         left = (
             "第 1 轮编辑 tests/alpha.py 时，文本不匹配而失败，"
@@ -63,6 +86,34 @@ B-5 公共长片段（套模板）
         self.assertEqual(
             app.extract_remote_b5_fragments(summary),
             ["文本不匹配而失败重新读取文件后才完成"],
+        )
+
+    def test_remote_planning_b5_fragment_is_extracted_from_qc_evidence(self):
+        summary = """查重命中证据
+B-5 公共长片段（套模板）
+本次提交
+复制
+正向证明了拆解顺序阶段反馈和状态追踪均
+历史池"""
+
+        self.assertEqual(
+            app.extract_remote_b5_fragments(summary),
+            ["正向证明了拆解顺序阶段反馈和状态追踪均"],
+        )
+
+    def test_remote_b5_fragment_is_extracted_from_collapsed_evidence(self):
+        summary = (
+            "查重命中证据 B-5 公共长片段（套模板） "
+            "本次提交 本维度打分 5 复制 "
+            "第轮先检查空仓库和运行条件再依次建立 "
+            "历史池 · runway-flash-code-decoder · 6106 对方打分 4 复制 "
+            "第轮先检查空仓库和运行条件再依次建立 "
+            "该维度的描述与批次内或历史数据高度重复"
+        )
+
+        self.assertEqual(
+            app.extract_remote_b5_fragments(summary),
+            ["第轮先检查空仓库和运行条件再依次建立"],
         )
 
     def test_history_duplicate_gets_three_targeted_rewrites_then_manual_fallback(self):
@@ -113,6 +164,87 @@ B-5 公共长片段（套模板）
             ):
                 app.normalize_evaluation(evaluation)
 
+    def test_evaluation_descriptions_reject_abstract_planning_proof(self):
+        evaluation = sample_evaluation()
+        evaluation["planning"]["description"] = (
+            "第 1 轮先检查领域服务，再补接口和页面测试。"
+            "这些记录正向证明了拆解顺序、阶段反馈和状态追踪都很完整。"
+        )
+
+        with self.assertRaisesRegex(app.WorkflowError, "正向证明"):
+            app.normalize_evaluation(evaluation)
+
+    def test_evaluation_descriptions_reject_generic_planning_sequence(self):
+        descriptions = (
+            "第 1 轮先检查空仓库和运行条件，再依次建立 app/solver.py 和接口测试。",
+            "第 1 轮先检查空仓库和运行条件，再依次创建求解器与接口模型。",
+        )
+        for description in descriptions:
+            evaluation = sample_evaluation()
+            evaluation["planning"]["description"] = description
+            with self.subTest(description=description), self.assertRaisesRegex(
+                app.WorkflowError, "任务规划描述使用公共流程模板"
+            ):
+                app.normalize_evaluation(evaluation)
+
+    def test_evaluation_descriptions_allow_project_specific_planning_opening(self):
+        evaluation = sample_evaluation()
+        evaluation["planning"]["description"] = (
+            "第 1 轮在 app/solver.py 确定前驱关系后，"
+            "再由 tests/test_solver.py 对拍小规模预言机；"
+            "该文件的 33 项检查通过后才进入接口验收。"
+        )
+
+        result = app.normalize_evaluation(evaluation)
+
+        self.assertEqual(result["planning"]["score"], 5)
+
+    def test_wording_only_repair_keeps_original_score(self):
+        evaluation = sample_evaluation()
+        evaluation["planning"] = {
+            "score": 4,
+            "description": "第 1 轮先检查空仓库和运行条件，再依次创建求解器。",
+        }
+        repaired_description = (
+            "第 1 轮在 app/solver.py 完成递推后才补 tests/test_solver.py。"
+            "测试后置让边界断言多改了一次。"
+        )
+        calls = 0
+
+        def validate(value, _turn):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise app.WorkflowError(
+                    "自动检查的任务规划描述使用公共流程模板"
+                )
+            return value
+
+        with mock.patch.object(
+            app, "normalize_evaluation", side_effect=validate
+        ), mock.patch.object(
+            app,
+            "run_codex_evaluation_dimension_repair",
+            return_value={"score": 5, "description": repaired_description},
+        ), mock.patch.object(
+            app, "validate_evaluation_final_verification_consistency"
+        ), mock.patch.object(
+            app, "validate_evaluation_trace_commands"
+        ), mock.patch.object(
+            app, "validate_evaluation_trace_grounding"
+        ):
+            result = app.normalize_evaluation_with_targeted_repairs(
+                evaluation,
+                1,
+                Path("."),
+                "原始需求",
+                [],
+                "轨迹",
+            )
+
+        self.assertEqual(result["planning"]["score"], 4)
+        self.assertEqual(result["planning"]["description"], repaired_description)
+
     def test_evaluation_descriptions_reject_heavy_review_tone(self):
         for phrase in (
             "无法支撑",
@@ -151,6 +283,10 @@ B-5 公共长片段（套模板）
         self.assertIn("具体不足及其实际影响", app.EVALUATION_DESCRIPTION_GUIDANCE)
         self.assertIn("不能为了拉开分差编造不足", app.EVALUATION_SCORE_GUIDANCE)
         self.assertIn(
+            "直接写先做了哪一步、何时报告状态以及后续怎样衔接",
+            app.EVALUATION_SCORE_GUIDANCE,
+        )
+        self.assertIn(
             "不能仅凭“最终检查通过”自动评 5 分",
             app.EVALUATION_DESCRIPTION_GUIDANCE,
         )
@@ -159,7 +295,7 @@ B-5 公共长片段（套模板）
             app.EVALUATION_DESCRIPTION_GUIDANCE,
         )
         self.assertIn(
-            "最终检查通过、没有剩余 Bug 或 next_action=complete 只能证明最终状态",
+            "最终检查通过、没有剩余 Bug 或 next_action=complete 只能说明最终状态",
             app.EVALUATION_SCORE_GUIDANCE,
         )
         self.assertIn(
@@ -1257,11 +1393,15 @@ B-5 公共长片段（套模板）
         self.assertIn(".back-to-top { position: fixed;", styles)
 
     def test_frontend_and_backend_versions_stay_in_sync(self):
+        html = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
         javascript = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
         match = re.search(r'^const UI_VERSION = "([^"]+)";', javascript)
 
         self.assertIsNotNone(match)
         self.assertEqual(match.group(1), app.APP_VERSION)
+        self.assertIn('id="console-version"', html)
+        self.assertIn(f"版本 {app.APP_VERSION}", html)
+        self.assertIn("versionLabel.textContent = `版本 ${backendVersion}`", javascript)
 
     def test_run_list_shows_start_time_without_framework_or_model_columns(self):
         html = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -1427,6 +1567,40 @@ B-5 公共长片段（套模板）
             manifest["host_permissions"],
             ["http://127.0.0.1:8765/*", "https://solo2.jzxhnh.com/*"],
         )
+
+    def test_remote_qc_notebook_has_its_own_page_and_uses_remote_only_endpoint(self):
+        html = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        javascript = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        styles = (app.STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+
+        for marker in (
+            'id="open-qc-notebook-page"',
+            'id="qc-notebook-view"',
+            'id="qc-notebook-query"',
+            'id="qc-notebook-status"',
+            'data-table-pagination="notebook"',
+        ):
+            self.assertIn(marker, html)
+        self.assertIn("/api/solo-qa/notebook", javascript)
+        self.assertIn('navigateTo("#qc-notebook")', javascript)
+        self.assertIn("只追加保存 SOLO-QA 返回的待返修和已废弃记录", html)
+        self.assertIn(".qc-notebook-card", styles)
+
+    def test_local_task_failure_library_has_separate_page_and_endpoint(self):
+        html = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        javascript = (app.STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
+        for marker in (
+            'id="open-task-failure-page"',
+            'id="task-failure-view"',
+            'id="task-failure-query"',
+            'id="task-failure-type"',
+            'data-table-pagination="taskFailures"',
+        ):
+            self.assertIn(marker, html)
+        self.assertIn("/api/task-failures", javascript)
+        self.assertIn('navigateTo("#task-failures")', javascript)
+        self.assertIn("上游容量、网络、权限和超时不会进入这里", html)
 
     def test_export_page_exposes_deep_preflight_controls(self):
         html = (app.STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -2301,6 +2475,65 @@ class ParsingTests(unittest.TestCase):
         self.assertIn("本轮完成前已退出", stored["error"])
         export.assert_called_once_with(created["id"], force=True)
 
+    def test_docker_inspect_timeout_keeps_original_session_and_recovers_monitoring(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root), mock.patch.object(
+                app, "HISTORY_PATH", root / "history.md"
+            ), mock.patch.object(app, "schedule_worker"):
+                app.initialize_database()
+                created = app.create_run({
+                    "repo_name": "inspect-timeout-demo",
+                    "project_directory": ".",
+                    "first_prompt": "完成容器化项目",
+                    "_defer_start": True,
+                })
+                app.update_run(
+                    created["id"],
+                    phase="first_running",
+                    session_id="existing-session",
+                )
+                sleep_count = 0
+
+                def finish_after_recovery(_seconds):
+                    nonlocal sleep_count
+                    sleep_count += 1
+                    if sleep_count == 2:
+                        app.update_run(created["id"], phase="stopped")
+
+                with mock.patch.object(
+                    app, "refresh_trace_snapshot", return_value=(None, None)
+                ), mock.patch.object(
+                    app,
+                    "docker_container_running",
+                    side_effect=[
+                        app.WorkflowError(
+                            "命令执行超时：docker inspect --format '{{.State.Running}}'"
+                        ),
+                        True,
+                    ],
+                ), mock.patch.object(
+                    app, "terminal_screen_text", return_value=""
+                ), mock.patch.object(
+                    app.time, "sleep", side_effect=finish_after_recovery
+                ), mock.patch.object(
+                    app, "add_event"
+                ) as event, mock.patch.object(
+                    app, "preserve_interrupted_docker_turn"
+                ) as preserve:
+                    app.monitor_docker_turn(created["id"], 1)
+
+                stored = app.serialize_run(app.run_row(created["id"]))
+
+        messages = [call.args[1] for call in event.call_args_list]
+        self.assertEqual(stored["phase"], "stopped")
+        self.assertEqual(stored["session_id"], "existing-session")
+        self.assertTrue(any("任务不判失败" in message for message in messages))
+        self.assertTrue(any("状态查询已恢复" in message for message in messages))
+        preserve.assert_not_called()
+
     def test_docker_monitor_marks_confirmation_without_writing_to_session(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -2386,6 +2619,156 @@ class ParsingTests(unittest.TestCase):
         send_prompt.assert_not_called()
         export.assert_not_called()
 
+    def test_first_turn_monitor_stops_at_persisted_ninety_minute_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root), mock.patch.object(
+                app, "HISTORY_PATH", root / "history.md"
+            ), mock.patch.object(app, "schedule_worker"):
+                app.initialize_database()
+                created = app.create_run({
+                    "repo_name": "first-turn-timeout-demo",
+                    "project_directory": ".",
+                    "first_prompt": "完成容器化项目",
+                    "_defer_start": True,
+                })
+                app.update_run(created["id"], phase="first_running")
+
+                with mock.patch.object(
+                    app, "refresh_trace_snapshot", return_value=(root, None)
+                ), mock.patch.object(
+                    app, "docker_container_running", return_value=True
+                ), mock.patch.object(
+                    app,
+                    "stage_elapsed_seconds",
+                    return_value=app.FIRST_TURN_MAX_RUNTIME_SECONDS,
+                ), mock.patch.object(
+                    app, "terminal_screen_text", return_value=""
+                ), mock.patch.object(
+                    app, "stop_overlong_first_turn", return_value=True
+                ) as stop:
+                    app.monitor_docker_turn(created["id"], 1)
+
+        stop.assert_called_once_with(
+            created["id"], "第一轮累计运行达到 90 分钟硬上限"
+        )
+
+    def test_first_turn_timeout_policy_uses_activity_and_final_stage_grace(self):
+        self.assertEqual(
+            app.first_turn_stop_reason(60 * 60, 10 * 60, False),
+            "第一轮运行达到 60 分钟，且最近 10 分钟没有轨迹活动",
+        )
+        self.assertEqual(
+            app.first_turn_stop_reason(60 * 60, 9 * 60, False),
+            "",
+        )
+        self.assertEqual(
+            app.first_turn_stop_reason(75 * 60, 0, False),
+            "第一轮运行超过 75 分钟，但还没有进入最终测试、构建或总结阶段",
+        )
+        self.assertEqual(
+            app.first_turn_stop_reason(75 * 60, 0, True),
+            "",
+        )
+        self.assertEqual(
+            app.first_turn_stop_reason(90 * 60, 0, True),
+            "第一轮累计运行达到 90 分钟硬上限",
+        )
+
+    def test_first_turn_final_stage_detection_uses_recent_work_markers(self):
+        self.assertTrue(app.first_turn_is_in_final_stage("正在运行 Playwright 页面验收"))
+        self.assertTrue(app.first_turn_is_in_final_stage("run the final regression suite"))
+        self.assertFalse(app.first_turn_is_in_final_stage("正在实现新的领域服务"))
+
+    def test_recent_trace_progress_does_not_treat_original_prompt_as_final_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace = root / "session.jsonl"
+            trace.write_text(
+                "\n".join(
+                    (
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "message": {
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "最终运行 Playwright 和完整验收",
+                                        }
+                                    ]
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "type": "assistant",
+                                "message": {
+                                    "content": [
+                                        {"type": "text", "text": "正在实现领域服务"}
+                                    ]
+                                },
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            progress = app.recent_trace_text(root)
+
+        self.assertNotIn("Playwright", progress)
+        self.assertFalse(app.first_turn_is_in_final_stage(progress))
+
+    def test_overlong_first_turn_is_stopped_cleaned_and_refill_is_woken(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root), mock.patch.object(
+                app, "HISTORY_PATH", root / "history.md"
+            ), mock.patch.object(app, "schedule_worker"):
+                app.initialize_database()
+                created = app.create_run({
+                    "repo_name": "clean-timeout-demo",
+                    "project_directory": ".",
+                    "first_prompt": "完成容器化项目",
+                    "_defer_start": True,
+                })
+                app.update_run(
+                    created["id"],
+                    phase="first_running",
+                    container_name="claude-eval-timeout",
+                    screen_name="claude-eval-timeout",
+                )
+                app.update_turn(created["id"], 1, status="running")
+                app.AUTO_REFILL_WAKE.clear()
+
+                with mock.patch.object(
+                    app,
+                    "export_and_remove_container",
+                    side_effect=app.WorkflowError("轨迹导出后未找到 JSONL"),
+                ) as export, mock.patch.object(
+                    app, "remove_container_resources_without_trace"
+                ) as remove:
+                    stopped = app.stop_overlong_first_turn(created["id"])
+
+                stored = app.serialize_run(app.run_row(created["id"]))
+
+        self.assertTrue(stopped)
+        self.assertEqual(stored["phase"], "stopped")
+        self.assertEqual(stored["turns"][0]["status"], "stopped")
+        self.assertEqual(stored["container_cleaned"], 1)
+        self.assertIn("换用新任务", stored["status_detail"])
+        self.assertTrue(app.AUTO_REFILL_WAKE.is_set())
+        export.assert_called_once_with(created["id"], force=True)
+        remove.assert_called_once()
+        app.AUTO_REFILL_WAKE.clear()
+
 
 class ReviewTests(unittest.TestCase):
     def test_evaluation_rubric_is_loaded_from_doc(self):
@@ -2439,6 +2822,10 @@ class ReviewTests(unittest.TestCase):
                 def communicate(self, input=None, timeout=None):
                     args = self.args
                     testcase.assertIn("gpt-5.6-sol", args)
+                    testcase.assertEqual(
+                        args[args.index("--config") + 1],
+                        'model_reasoning_effort="high"',
+                    )
                     testcase.assertIn("workspace-write", args)
                     testcase.assertIn("--ephemeral", args)
                     testcase.assertIn("--ignore-user-config", args)
@@ -2450,6 +2837,14 @@ class ReviewTests(unittest.TestCase):
                     testcase.assertIn("执行能力(Toolcall)", input)
                     testcase.assertIn("不得改用十分制", input)
                     testcase.assertIn(app.TASK_DIFFICULTY_GUIDANCE, input)
+                    testcase.assertIn(
+                        "修改失误、错误命令、失败次数和返工次数",
+                        app.TASK_DIFFICULTY_GUIDANCE,
+                    )
+                    testcase.assertIn(
+                        "不能用实现过程不顺、执行者耗时较长或最终交付失败反推任务更难",
+                        app.TASK_DIFFICULTY_GUIDANCE,
+                    )
                     testcase.assertIn(app.BUG_REPAIR_PROMPT_STYLE_GUIDANCE, input)
                     testcase.assertIn("与本轮范围无关的历史问题", input)
                     testcase.assertIn("不得要求修改相应代码", input)
@@ -2461,6 +2856,7 @@ class ReviewTests(unittest.TestCase):
                         json.dumps({
                             "summary": "发现一个事务问题",
                             "next_action": "bugfix",
+                            "repair_difficulty_review": sample_repair_difficulty(),
                             "bugs": [
                                 {
                                     "severity": "高",
@@ -2490,6 +2886,110 @@ class ReviewTests(unittest.TestCase):
                 "同一业务键同时提交会生成两条记录，正确结果只能保留一条。",
             )
 
+    def test_review_schema_and_prompt_require_repair_difficulty_preflight(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+            completed = {
+                "summary": "没有发现问题",
+                "next_action": "complete",
+                "bugs": [],
+                "quality_gaps": [],
+                "evaluation": sample_evaluation(),
+                "repair_difficulty_review": sample_repair_difficulty("简单"),
+            }
+            with mock.patch.object(
+                app, "run_codex_structured", return_value=completed
+            ) as runner:
+                app.run_codex_review(repo, "原始题面", [])
+
+        prompt, schema = runner.call_args.args[:2]
+        self.assertIn("repair_difficulty_review", schema["required"])
+        self.assertIn("只修复 bugs 中这些已复现问题", prompt)
+        self.assertIn("不得增加、合并或改写 Bug 来凑困难", prompt)
+
+    def test_medium_repair_difficulty_does_not_pass_hard_gate(self):
+        result = {
+            "next_action": "bugfix",
+            "repair_difficulty_review": sample_repair_difficulty("中等"),
+        }
+
+        self.assertEqual(app.repair_difficulty_level(result), "中等")
+        self.assertIn(
+            "低于困难",
+            "；".join(app.repair_difficulty_review_errors(result)),
+        )
+
+    def test_codex_structured_honors_explicit_medium_reasoning_effort(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+            captured_args = []
+
+            class FakeProcess:
+                def __init__(self, args, **kwargs):
+                    captured_args.extend(args)
+                    self.returncode = 0
+                    self.pid = 999999
+
+                def communicate(self, input=None, timeout=None):
+                    output_path = Path(
+                        captured_args[captured_args.index("--output-last-message") + 1]
+                    )
+                    output_path.write_text('{"ok": true}', encoding="utf-8")
+                    return "", ""
+
+            with mock.patch.object(app.subprocess, "Popen", side_effect=FakeProcess):
+                result = app.run_codex_structured(
+                    "只做常规文本修正",
+                    {
+                        "type": "object",
+                        "properties": {"ok": {"type": "boolean"}},
+                        "required": ["ok"],
+                        "additionalProperties": False,
+                    },
+                    repo,
+                    "routine-rewrite",
+                    60,
+                    reasoning_effort=app.CODEX_ROUTINE_REASONING_EFFORT,
+                )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(
+            captured_args[captured_args.index("--config") + 1],
+            'model_reasoning_effort="medium"',
+        )
+
+    def test_codex_structured_classifies_model_capacity_separately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+
+            class CapacityProcess:
+                returncode = 1
+                pid = 999999
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def communicate(self, input=None, timeout=None):
+                    return "", "ERROR: Selected model is at capacity. Please try again."
+
+            with mock.patch.object(app.subprocess, "Popen", CapacityProcess):
+                with self.assertRaises(app.UpstreamCapacityError):
+                    app.run_codex_structured(
+                        "检查题面",
+                        {
+                            "type": "object",
+                            "properties": {"ok": {"type": "boolean"}},
+                            "required": ["ok"],
+                            "additionalProperties": False,
+                        },
+                        repo,
+                        "capacity-check",
+                        60,
+                    )
+
     def test_followup_bug_prompt_uses_the_same_natural_style_guidance(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory) / "repo"
@@ -2510,6 +3010,7 @@ class ReviewTests(unittest.TestCase):
                 )
 
         prompt = runner.call_args.args[0]
+        schema = runner.call_args.args[1]
         self.assertIn(app.BUG_REPAIR_PROMPT_STYLE_GUIDANCE, prompt)
         self.assertIn(app.EVALUATION_SCORE_GUIDANCE, prompt)
         self.assertIn("交付完整性 (Delivery)", prompt)
@@ -2519,6 +3020,8 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("与本次范围无关的历史问题", prompt)
         self.assertIn("不得要求修改相应代码", prompt)
         self.assertIn("本次评分对应第 2 轮", prompt)
+        self.assertIn("repair_difficulty_review", schema["required"])
+        self.assertIn("只修复 remaining_bugs 中这些已复现问题", prompt)
 
     def test_final_review_repairs_only_rejected_dimension_description(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2565,6 +3068,10 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(runner.call_args_list[0].args[3], "final-review")
         self.assertEqual(
             runner.call_args_list[1].args[3], "planning-description-repair"
+        )
+        self.assertEqual(
+            runner.call_args_list[1].kwargs["reasoning_effort"],
+            app.CODEX_ROUTINE_REASONING_EFFORT,
         )
         self.assertEqual(result["evaluation"]["delivery"], original_delivery)
         self.assertEqual(
@@ -2835,6 +3342,19 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(app.WorkflowError, "人工确认"):
             app.bug_repair_prompt(bugs, previous_prompt=previous)
 
+    def test_bug_repair_prompt_stops_same_rounding_bug_with_a_new_boundary(self):
+        bugs = [{
+            "customer_summary": "黑色展签叠加一级深灰墙并填写高精度覆盖率时，有效颜色会错误提亮一档",
+        }]
+        previous = (
+            "展签工具按油墨覆盖率混合文字与展墙底色后裁决对比度。"
+            "黑色展签以三成覆盖率叠加四十五级深灰展墙时，当前三个有效色通道均少一档，"
+            "正确结果应为向上舍入后的颜色。"
+        )
+
+        with self.assertRaisesRegex(app.WorkflowError, "人工确认"):
+            app.bug_repair_prompt(bugs, previous_prompt=previous)
+
     def test_bug_repair_prompt_allows_proven_residual_state(self):
         bugs = [{
             "customer_summary": "上轮已拦截单个尾随换行，但连续两个空行仍会生成记录并消耗实物序号",
@@ -2946,6 +3466,7 @@ class ReviewTests(unittest.TestCase):
                 review = {
                     "summary": "检查完成",
                     "next_action": "bugfix",
+                    "repair_difficulty_review": sample_repair_difficulty(),
                     "bugs": [{"severity": "中", "title": "缺少边界校验", "evidence": "接口未校验", "fix": "补充校验"}],
                     "repair_prompt": "修复接口缺少边界校验的问题，并补充回归测试和 Docker 验收。",
                     "evaluation": sample_evaluation(),
@@ -2965,6 +3486,118 @@ class ReviewTests(unittest.TestCase):
                 scheduler.assert_called_once_with(
                     "review111111", "second_queued", app.second_turn_worker
                 )
+
+    def test_review_worker_keeps_first_turn_but_skips_medium_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                timestamp = app.now_text()
+                with app.db_connection() as database:
+                    database.execute(
+                        """INSERT INTO runs(
+                          id, repo_name, repo_path, phase, first_prompt, first_prompt_id,
+                          first_verification, verification_commands, repo_url, base_sha,
+                          snapshot_url, container_cleaned, created_at, updated_at
+                        ) VALUES (?, ?, ?, 'review_queued', ?, 'prompt-1', '[]', '[]',
+                                  'https://github.com/example/review-demo', 'base-sha',
+                                  'https://github.com/example/review-demo/commit/base-sha', 1, ?, ?)""",
+                        ("mediumrepair", "review-demo", str(repo), "原始需求", timestamp, timestamp),
+                    )
+                    database.execute(
+                        """INSERT INTO run_turns(
+                          run_id, turn_number, intent_type, prompt, status,
+                          verification, created_at, updated_at
+                        ) VALUES (?, 1, '0-1 代码生成', '原始需求', 'reviewing', '[]', ?, ?)""",
+                        ("mediumrepair", timestamp, timestamp),
+                    )
+                review = {
+                    "summary": "确认两个局部问题",
+                    "next_action": "bugfix",
+                    "repair_difficulty_review": sample_repair_difficulty("中等"),
+                    "bugs": [
+                        {"title": "镜像标签不存在"},
+                        {"title": "校验顺序错误"},
+                    ],
+                    "repair_prompt": "修正镜像标签和校验顺序。",
+                    "evaluation": sample_evaluation(),
+                }
+                with mock.patch.object(
+                    app, "run_codex_review", return_value=review
+                ), mock.patch.object(app, "schedule_worker") as scheduler, mock.patch.object(
+                    app.AUTO_REFILL_WAKE, "set"
+                ) as wake:
+                    app.review_worker("mediumrepair")
+
+                stored = app.serialize_run(app.run_row("mediumrepair"))
+                candidate = app.auto_refill_iteration_candidate("Feature 迭代")
+
+        self.assertEqual(stored["phase"], "complete")
+        self.assertEqual(stored["turn_count"], 1)
+        self.assertIsNone(stored["second_prompt"])
+        self.assertIn("第 2 轮修复题面预检未通过", stored["status_detail"])
+        self.assertIn("实际难度为中等", stored["status_detail"])
+        self.assertIn("保留为可用基线", stored["status_detail"])
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["id"], "mediumrepair")
+        scheduler.assert_not_called()
+        wake.assert_called_once_with()
+
+    def test_review_worker_marks_score_cap_and_preserves_refill_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                app.write_settings({"collection_score_started_at": "2000-01-01 00:00:00"})
+                timestamp = app.now_text()
+                with app.db_connection() as database:
+                    database.execute(
+                        """INSERT INTO runs(
+                          id, repo_name, repo_path, phase, first_prompt, first_verification,
+                          verification_commands, created_at, updated_at
+                        ) VALUES (?, ?, ?, 'review_queued', ?, '[]', '[]', ?, ?)""",
+                        ("scorecap1111", "score-cap-demo", str(repo), "原始需求", timestamp, timestamp),
+                    )
+                    database.execute(
+                        """INSERT INTO run_turns(
+                          run_id, turn_number, intent_type, prompt, status,
+                          verification, created_at, updated_at
+                        ) VALUES (?, 1, '0-1 代码生成', '原始需求', 'reviewing', '[]', ?, ?)""",
+                        ("scorecap1111", timestamp, timestamp),
+                    )
+                review = {
+                    "summary": "检查完成",
+                    "next_action": "bugfix",
+                    "repair_difficulty_review": sample_repair_difficulty(),
+                    "bugs": [{"severity": "中", "title": "问题", "evidence": "证据", "fix": "修复"}],
+                    "repair_prompt": "修复问题",
+                    "evaluation": sample_evaluation(),
+                }
+                with mock.patch.object(app, "run_codex_review", return_value=review), mock.patch.object(
+                    app, "schedule_worker"
+                ) as scheduler, mock.patch.object(app.AUTO_REFILL_WAKE, "set") as wake:
+                    app.review_worker("scorecap1111")
+
+                stored = app.serialize_run(app.run_row("scorecap1111"))
+                self.assertEqual(stored["phase"], "score_capped")
+                self.assertIn("25", stored["status_detail"])
+                self.assertIn("仓库可作为新补题来源", stored["status_detail"])
+                self.assertEqual(stored["turns"][0]["status"], "complete")
+                failure_page = app.local_task_failure_notebook_page(
+                    {"type": ["score_cap"]}
+                )
+                self.assertEqual(failure_page["total"], 1)
+                self.assertEqual(failure_page["items"][0]["run_id"], "scorecap1111")
+                scheduler.assert_not_called()
+                wake.assert_called_once_with()
 
     def test_bugfix_followup_uses_the_existing_container_terminal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3337,6 +3970,7 @@ class ReviewTests(unittest.TestCase):
                 review = {
                     "summary": "仍有一个真实问题",
                     "next_action": "bugfix",
+                    "repair_difficulty_review": sample_repair_difficulty(),
                     "remaining_bugs": [{
                         "severity": "中",
                         "title": "事务回滚不完整",
@@ -3358,6 +3992,64 @@ class ReviewTests(unittest.TestCase):
                 self.assertEqual(stored["turns"][2]["intent_type"], "Bug 修复")
                 self.assertEqual(stored["turns"][2]["prompt"], review["repair_prompt"])
                 scheduler.assert_called_once_with("loop33333333", "second_queued", app.second_turn_worker)
+
+    def test_final_review_worker_skips_medium_followup_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            repo.mkdir()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                timestamp = app.now_text()
+                with app.db_connection() as database:
+                    database.execute(
+                        """INSERT INTO runs(
+                          id, repo_name, repo_path, workspace_path, phase, session_id,
+                          first_prompt, first_prompt_id, second_prompt, second_prompt_id,
+                          second_verification, verification_commands, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 'final_review_queued', 'same-session',
+                                  '原始需求', 'p1', '第一次修复', 'p2', '[]', '[]', ?, ?)""",
+                        ("mediumfinal1", "loop-demo", str(repo), str(repo), timestamp, timestamp),
+                    )
+                    for number, intent, prompt, prompt_id in (
+                        (1, "0-1 代码生成", "原始需求", "p1"),
+                        (2, "Bug 修复", "第一次修复", "p2"),
+                    ):
+                        database.execute(
+                            """INSERT INTO run_turns(
+                              run_id, turn_number, intent_type, prompt, prompt_id,
+                              verification, status, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, '[]', 'reviewing', ?, ?)""",
+                            ("mediumfinal1", number, intent, prompt, prompt_id, timestamp, timestamp),
+                        )
+                review = {
+                    "summary": "仍有两个局部问题",
+                    "next_action": "bugfix",
+                    "repair_difficulty_review": sample_repair_difficulty("中等"),
+                    "remaining_bugs": [
+                        {"title": "配置标签错误"},
+                        {"title": "字段提示顺序错误"},
+                    ],
+                    "repair_prompt": "修正配置标签和字段提示顺序。",
+                    "evaluation": sample_evaluation("Bug 修复"),
+                }
+                with mock.patch.object(
+                    app, "run_codex_final_review", return_value=review
+                ), mock.patch.object(app, "schedule_worker") as scheduler, mock.patch.object(
+                    app.AUTO_REFILL_WAKE, "set"
+                ) as wake:
+                    app.final_review_worker("mediumfinal1")
+
+                stored = app.serialize_run(app.run_row("mediumfinal1"))
+
+        self.assertEqual(stored["phase"], "complete")
+        self.assertEqual(stored["turn_count"], 2)
+        self.assertIn("第 3 轮修复题面预检未通过", stored["status_detail"])
+        self.assertIn("保留为可用基线", stored["status_detail"])
+        scheduler.assert_not_called()
+        wake.assert_called_once_with()
 
     def test_final_review_worker_stops_at_tenth_turn_with_open_bug(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3398,6 +4090,7 @@ class ReviewTests(unittest.TestCase):
                 review = {
                     "summary": "第十轮仍有一个可核验问题",
                     "next_action": "bugfix",
+                    "repair_difficulty_review": sample_repair_difficulty(),
                     "remaining_bugs": [{
                         "severity": "中",
                         "title": "回滚状态不完整",
@@ -4060,6 +4753,13 @@ class DraftTests(unittest.TestCase):
             "reasons": [],
             "soft_suggestions": [],
             "closest_history_repo": "",
+            "difficulty_review": {
+                "level": "困难",
+                "hard_drivers": ["跨进程投递状态恢复"],
+                "human_work_reasons": ["需要验证并发领取和中断恢复的不变量"],
+                "inflated_label_risk": False,
+                "one_hour_feasible": True,
+            },
             "scope_review": {
                 "engineering_core_count": 1,
                 "implementation_modules": ["事件接收", "投递状态", "人工重放", "结果查询"],
@@ -4090,7 +4790,7 @@ class DraftTests(unittest.TestCase):
 
         self.assertEqual(draft["project_number"], "0001")
         self.assertEqual(draft["task_type"], "0-1 代码生成")
-        self.assertEqual(draft["task_difficulty"], "待评估")
+        self.assertEqual(draft["task_difficulty"], "困难")
         self.assertEqual(draft["first_prompt"], self.candidate()["prompt"])
         self.assertNotIn("项目编号", draft["first_prompt"])
         self.assertNotIn("\n", draft["first_prompt"])
@@ -4133,11 +4833,11 @@ class DraftTests(unittest.TestCase):
         validate.assert_called_once()
         self.assertEqual(validate.call_args.args[0]["first_prompt"], preferred["prompt"])
 
-    def test_task_candidate_schema_enforces_hard_prompt_length(self):
+    def test_task_candidate_schema_enforces_generation_prompt_length(self):
         prompt_schema = app.task_candidate_schema()["properties"]["prompt"]
 
         self.assertEqual(prompt_schema["minLength"], 300)
-        self.assertEqual(prompt_schema["maxLength"], 600)
+        self.assertEqual(prompt_schema["maxLength"], 520)
 
     def test_targeted_rewrite_repeats_prompt_length_budget(self):
         candidate = self.candidate()
@@ -4157,12 +4857,18 @@ class DraftTests(unittest.TestCase):
 
         rewrite_prompt = structured.call_args.args[0]
         self.assertIn("目标约 450 字", rewrite_prompt)
-        self.assertIn("优先控制在 300 至 520 字", rewrite_prompt)
-        self.assertIn("必须处于 300 至 600 字", rewrite_prompt)
+        self.assertIn("严格控制在 300 至 520 字", rewrite_prompt)
+        self.assertNotIn("必须处于 300 至 600 字", rewrite_prompt)
         self.assertIn("不能只增不减", rewrite_prompt)
         self.assertIn("从空仓库起步和 Docker Compose", rewrite_prompt)
+        self.assertIn("同一句最多出现 3 个技术名称", rewrite_prompt)
+        self.assertIn("以完整中文句子结束", rewrite_prompt)
         self.assertIn('"independent_review"', rewrite_prompt)
         self.assertIn('"supporting_mechanisms": ["幂等", "重试", "统计"]', rewrite_prompt)
+        self.assertEqual(
+            structured.call_args.kwargs["reasoning_effort"],
+            app.CODEX_ROUTINE_REASONING_EFFORT,
+        )
 
     def test_task_generation_uses_second_batch_only_after_local_hard_failure(self):
         invalid = self.candidate()
@@ -4316,6 +5022,8 @@ class DraftTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["candidates"]["maxItems"], 2)
         properties = schema["properties"]["candidates"]["items"]["properties"]
         self.assertNotIn("task_difficulty", properties)
+        self.assertNotIn("minItems", properties["acceptance_scenarios"])
+        self.assertNotIn("maxItems", properties["acceptance_scenarios"])
         for field in app.TASK_DIVERSITY_FIELDS:
             self.assertIn(field, properties)
         for field in app.TASK_SCOPE_LIST_FIELDS:
@@ -4326,13 +5034,22 @@ class DraftTests(unittest.TestCase):
         self.assertIn("不能成为主体", generation_prompt)
         self.assertIn("不能只替换业务名词", generation_prompt)
         self.assertIn("最后 160 字", generation_prompt)
+        self.assertIn("不按固定数量裁决", generation_prompt)
+        self.assertIn("纯页面键盘交互", generation_prompt)
+        self.assertIn("恰好一条困难轴", generation_prompt)
         self.assertIn("最多出现 3 种", generation_prompt)
         self.assertIn("这是写作偏好", generation_prompt)
+        self.assertIn("长技术栈套句", generation_prompt)
+        self.assertIn("以完整中文句子结束", generation_prompt)
         self.assertIn("只有会导致核心验收结果不唯一", generation_prompt)
         self.assertIn("有且只有一个", generation_prompt)
         self.assertIn("范围预算", generation_prompt)
         self.assertIn("最多 2 个", generation_prompt)
-        self.assertIn("自定义算法只能选择一条作为主难点", generation_prompt)
+        self.assertIn("只选择一条真实主难点", generation_prompt)
+        self.assertIn("实际工作量必须达到熟练工程师评定的困难或地狱", generation_prompt)
+        self.assertIn("约 45 分钟", generation_prompt)
+        self.assertIn("约 15 分钟", generation_prompt)
+        self.assertIn("不主动追求“地狱”", generation_prompt)
         self.assertIn("没有需要持久化的数据就不要启动数据库", generation_prompt)
         self.assertNotIn("复杂度控制在中等偏易", generation_prompt)
 
@@ -4357,7 +5074,7 @@ class DraftTests(unittest.TestCase):
         )
         self.assertEqual(app.category_for_project_number(11), "纯后端")
 
-    def test_task_validation_does_not_expose_a_difficulty_gate(self):
+    def test_task_validation_requires_an_independent_difficulty_gate(self):
         with mock.patch.object(
             app,
             "run_codex_structured",
@@ -4374,8 +5091,10 @@ class DraftTests(unittest.TestCase):
                 [],
             )
         schema = codex.call_args.args[1]
-        self.assertNotIn("difficulty", schema["properties"])
-        self.assertNotIn("required_difficulty", codex.call_args.args[0])
+        self.assertIn("difficulty_review", schema["properties"])
+        self.assertIn("difficulty_review", schema["required"])
+        self.assertIn("普通 CRUD", codex.call_args.args[0])
+        self.assertIn("level 为困难或地狱", codex.call_args.args[0])
         self.assertIn("scope_review", schema["properties"])
         self.assertIn("soft_suggestions", schema["properties"])
         self.assertIn("不能照抄或信任候选题自报的范围字段", codex.call_args.args[0])
@@ -4405,7 +5124,6 @@ class DraftTests(unittest.TestCase):
             ("supporting_mechanisms", ["幂等", "重试", "统计"], "辅助机制"),
             ("complex_mechanisms", ["崩溃续作", "反向补偿"], "复杂机制"),
             ("custom_algorithm_families", ["格式解释", "计算几何"], "自定义算法体系"),
-            ("acceptance_scenarios", ["一", "二", "三", "四", "五", "六", "七"], "验收场景"),
         )
         for field, values, message in cases:
             with self.subTest(field=field):
@@ -4414,10 +5132,17 @@ class DraftTests(unittest.TestCase):
                 with self.assertRaisesRegex(app.WorkflowError, message):
                     app.validate_generated_task(candidate, 1, "纯后端", [])
 
+        candidate = self.candidate()
+        candidate["acceptance_scenarios"] = [
+            "一", "二", "三", "四", "五", "六", "七"
+        ]
+        result = app.validate_generated_task(candidate, 1, "纯后端", [])
+        self.assertEqual(len(result["acceptance_scenarios"]), 7)
+
     def test_local_task_validation_rejects_complex_state_plus_custom_algorithm(self):
         candidate = self.candidate()
         candidate["custom_algorithm_families"] = ["区间裁决"]
-        with self.assertRaisesRegex(app.WorkflowError, "只能选择复杂状态机制或自定义算法"):
+        with self.assertRaisesRegex(app.WorkflowError, "必须且只能有一条"):
             app.validate_generated_task(candidate, 1, "纯后端", [])
 
     def test_local_task_validation_requires_scope_metadata(self):
@@ -4437,8 +5162,32 @@ class DraftTests(unittest.TestCase):
 
         self.assertTrue(any("复杂机制共 2 项" in error for error in errors))
         self.assertTrue(any("未申报的实质范围" in error for error in errors))
-        self.assertTrue(any("未定义规则" in error for error in errors))
-        self.assertTrue(any("没有实际职责的基础设施" in error for error in errors))
+
+    def test_independent_review_rejects_medium_or_inflated_difficulty(self):
+        review = self.scope_review()
+        review["difficulty_review"].update(
+            {
+                "level": "中等",
+                "hard_drivers": [],
+                "human_work_reasons": ["只涉及常规跨模块实现"],
+                "inflated_label_risk": True,
+                "one_hour_feasible": True,
+            }
+        )
+
+        errors = app.task_review_scope_errors(review)
+
+        self.assertTrue(any("低于困难" in error for error in errors))
+        self.assertTrue(any("没有指出" in error for error in errors))
+        self.assertTrue(any("包装成困难" in error for error in errors))
+
+    def test_independent_review_rejects_scope_that_cannot_finish_in_one_hour(self):
+        review = self.scope_review()
+        review["difficulty_review"]["one_hour_feasible"] = False
+
+        errors = app.task_review_scope_errors(review)
+
+        self.assertTrue(any("60 分钟" in error for error in errors))
 
     def test_local_task_validation_hard_limit_is_600_chars(self):
         candidate = self.candidate()
@@ -4450,6 +5199,23 @@ class DraftTests(unittest.TestCase):
         candidate = self.candidate()
         candidate["prompt"] = "设备突发故障，代码从空仓库起步，并使用 Docker 完成运行与验收。"
         with self.assertRaisesRegex(app.WorkflowError, "300"):
+            app.validate_generated_task(candidate, 1, "纯后端", [])
+
+    def test_local_task_validation_rejects_empty_repo_technology_inventory_template(self):
+        candidate = self.candidate()
+        candidate["prompt"] = candidate["prompt"].replace(
+            "代码从一个空仓库起步，不创建任何前端页面，使用 Python 编写服务，由 FastAPI 提供事件接收、订阅配置、失败查询和人工重放接口，PostgreSQL 保存不可变投递记录。",
+            "请从空仓库起步，使用 Python 3.12、FastAPI、Pydantic、SQLAlchemy、PostgreSQL 和 pytest 实现纯后端 API。",
+        )
+
+        with self.assertRaisesRegex(app.WorkflowError, "长串技术栈"):
+            app.validate_generated_task(candidate, 1, "纯后端", [])
+
+    def test_local_task_validation_rejects_truncated_prompt_ending(self):
+        candidate = self.candidate()
+        candidate["prompt"] = candidate["prompt"][:-1] + "并提供名为 vinfy"
+
+        with self.assertRaisesRegex(app.WorkflowError, "完整中文句子"):
             app.validate_generated_task(candidate, 1, "纯后端", [])
 
     def test_local_task_validation_rejects_project_number_in_prompt(self):
@@ -4625,6 +5391,33 @@ class DraftTests(unittest.TestCase):
             self.assertEqual(second["project_number"], "0001")
             scheduler.assert_called_once()
 
+    def test_explicit_parallel_automatic_create_starts_four_distinct_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root), mock.patch.object(
+                app, "HISTORY_PATH", root / "history.md"
+            ), mock.patch.object(app, "schedule_worker") as scheduler:
+                app.initialize_database()
+                payload = {
+                    "project_directory": "team-a",
+                    "_allow_parallel_generation": True,
+                }
+                first = app.create_automatic_run(payload)
+                second = app.create_automatic_run(payload)
+                third = app.create_automatic_run(payload)
+                fourth = app.create_automatic_run(payload)
+                with self.assertRaisesRegex(app.WorkflowError, "同时最多生成 4 个"):
+                    app.create_automatic_run(payload)
+
+            self.assertNotEqual(first["id"], second["id"])
+            self.assertEqual(first["project_number"], "0001")
+            self.assertEqual(second["project_number"], "0002")
+            self.assertEqual(third["project_number"], "0003")
+            self.assertEqual(fourth["project_number"], "0004")
+            self.assertEqual(scheduler.call_count, 4)
+
     def test_failed_generation_retries_same_number_before_next_create_advances(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -4702,7 +5495,42 @@ class DraftTests(unittest.TestCase):
                 created["id"], "generation_queued", app.automatic_generation_worker
             )
 
-    def test_auto_filled_generation_failure_skips_source_without_global_pause(self):
+    def test_four_failed_generations_can_retry_in_parallel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root), mock.patch.object(
+                app, "HISTORY_PATH", root / "history.md"
+            ), mock.patch.object(app, "schedule_worker") as scheduler:
+                app.initialize_database()
+                payload = {
+                    "project_directory": "team-a",
+                    "_allow_parallel_generation": True,
+                }
+                created = [app.create_automatic_run(payload) for _ in range(4)]
+                for run in created:
+                    app.update_turn(run["id"], 1, status="failed")
+                    app.update_run(
+                        run["id"],
+                        phase="failed",
+                        status_detail="题目生成失败",
+                        error="候选不合规",
+                    )
+                scheduler.reset_mock()
+                retried = [
+                    app.retry_automatic_generation(run["id"])
+                    for run in created
+                ]
+
+            self.assertEqual(
+                [run["project_number"] for run in retried],
+                ["0001", "0002", "0003", "0004"],
+            )
+            self.assertTrue(all(run["phase"] == "generation_queued" for run in retried))
+            self.assertEqual(scheduler.call_count, 4)
+
+    def test_auto_filled_content_rejection_skips_without_full_generation_retry(self):
         rejection = (
             f"连续 {app.TASK_GENERATION_BATCH_ATTEMPTS} 批未生成合规题目："
             "并列裁决与数值序列化规则不明确"
@@ -4724,30 +5552,25 @@ class DraftTests(unittest.TestCase):
                 scheduler.reset_mock()
 
                 app.automatic_generation_worker(created["id"])
-                retrying = app.serialize_run(app.run_row(created["id"]))
-                app.automatic_generation_worker(created["id"])
                 exhausted = app.serialize_run(app.run_row(created["id"]))
                 configuration = app.auto_refill_configuration()
                 failure_count = app.settings_values(
                     ("auto_refill_consecutive_failures",)
                 )["auto_refill_consecutive_failures"]
+                failures = app.local_task_failure_notebook_page({})
 
-            self.assertEqual(retrying["phase"], "generation_queued")
-            self.assertEqual(retrying["generation_retry_count"], 1)
             self.assertEqual(exhausted["phase"], "failed")
             self.assertEqual(exhausted["project_number"], "0001")
-            self.assertEqual(exhausted["generation_retry_count"], 1)
+            self.assertEqual(exhausted["generation_retry_count"], 0)
             self.assertTrue(configuration["enabled"])
             self.assertIn("题面校验", configuration["detail"])
             self.assertEqual(failure_count, "0")
-            scheduler.assert_called_once_with(
-                created["id"], "generation_queued", app.automatic_generation_worker
-            )
-            self.assertEqual(generate.call_count, 2)
+            scheduler.assert_not_called()
+            self.assertEqual(generate.call_count, 1)
             self.assertNotIn("initial_feedback", generate.call_args_list[0].kwargs)
-            self.assertEqual(
-                generate.call_args_list[1].kwargs["initial_feedback"], rejection
-            )
+            self.assertEqual(failures["total"], 1)
+            self.assertEqual(failures["items"][0]["run_id"], created["id"])
+            self.assertEqual(failures["items"][0]["failure_stage"], "0-1 题面预检")
 
     def test_candidate_review_rejection_does_not_trip_auto_refill_breaker(self):
         rejection = (
@@ -4768,7 +5591,6 @@ class DraftTests(unittest.TestCase):
                 created = app.create_automatic_run(
                     {"project_directory": "team-a", "_auto_refill": True}
                 )
-                app.automatic_generation_worker(created["id"])
                 app.automatic_generation_worker(created["id"])
                 configuration = app.auto_refill_configuration()
                 failure_count = app.settings_values(
@@ -4856,11 +5678,78 @@ class AutoRefillTests(unittest.TestCase):
                 )
                 self.assertTrue(enabled["enabled"])
                 self.assertEqual(enabled["project_directory"], "team-a")
-                self.assertEqual(enabled["max_iterations_per_root"], 6)
-                self.assertEqual(enabled["max_new_modules_per_root"], 2)
-                self.assertEqual(enabled["new_module_slots"], [3, 6])
-                self.assertEqual(enabled["bugfix_slots"], [2, 5])
+                self.assertEqual(enabled["default_iterations_per_root"], 2)
+                self.assertEqual(enabled["max_iterations_per_root"], 3)
+                self.assertEqual(enabled["max_new_modules_per_root"], 1)
+                self.assertEqual(enabled["new_module_slots"], [])
+                self.assertEqual(enabled["bugfix_slots"], [])
                 self.assertIsNone(enabled["disable_at"])
+
+    def test_iteration_context_reads_submitted_and_active_prompts_from_same_repository(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root):
+                app.initialize_database()
+                timestamp = app.now_text()
+                with app.db_connection() as database:
+                    self.insert_run(database, "source111111", "shared-repo")
+                    self.insert_run(database, "submitted111", "shared-repo")
+                    self.insert_run(database, "repair111111", "shared-repo")
+                    self.insert_run(database, "draft1111111", "shared-repo")
+                    self.insert_run(database, "other1111111", "other-repo")
+                    for run_id, prompt in (
+                        ("submitted111", "同仓库已经提交的微调建议题面"),
+                        ("repair111111", "同仓库等待返修的局部清洁题面"),
+                        ("draft1111111", "同仓库尚未提交的草稿题面"),
+                        ("other1111111", "其他仓库已经提交的题面"),
+                    ):
+                        database.execute(
+                            """INSERT INTO run_turns(
+                                 run_id, turn_number, intent_type, prompt, status,
+                                 created_at, updated_at
+                               ) VALUES (?, 1, 'Feature 迭代', ?, 'complete', ?, ?)""",
+                            (run_id, prompt, timestamp, timestamp),
+                        )
+                    database.execute(
+                        """INSERT INTO solo_qa_submissions(
+                             run_id, turn_number, remote_submission_id, remote_status,
+                             state, submitted_at, created_at, updated_at
+                           ) VALUES ('submitted111', 1, '11217', 'PENDING',
+                                     'qc_pending', ?, ?, ?)""",
+                        (timestamp, timestamp, timestamp),
+                    )
+                    database.execute(
+                        """INSERT INTO solo_qa_submissions(
+                             run_id, turn_number, remote_submission_id, remote_status,
+                             state, submitted_at, created_at, updated_at
+                           ) VALUES ('repair111111', 1, '11405', 'PENDING_FIX',
+                                     'needs_fix', ?, ?, ?)""",
+                        (timestamp, timestamp, timestamp),
+                    )
+                    database.execute(
+                        """INSERT INTO solo_qa_submissions(
+                             run_id, turn_number, remote_submission_id, remote_status,
+                             state, submitted_at, created_at, updated_at
+                           ) VALUES ('other1111111', 1, '90000', 'PENDING',
+                                     'qc_pending', ?, ?, ?)""",
+                        (timestamp, timestamp, timestamp),
+                    )
+
+                history = app.same_repository_submission_history(
+                    app.run_row("source111111")
+                )
+
+        self.assertEqual(len(history), 3)
+        self.assertEqual(
+            {item["reference_id"] for item in history},
+            {"11217", "11405", "local:draft1111111"},
+        )
+        self.assertIn(
+            "同仓库尚未提交的草稿题面",
+            {item["prompt"] for item in history},
+        )
 
     def test_scheduled_refill_shutdown_is_persistent_and_does_not_stop_runs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5019,7 +5908,7 @@ class AutoRefillTests(unittest.TestCase):
                 self.assertTrue(cleared["enabled"])
                 self.assertIsNone(cleared["disable_at"])
 
-    def test_candidate_respects_six_iteration_cap_and_one_active_child(self):
+    def test_candidate_respects_three_iteration_cap_and_one_active_child(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
@@ -5029,7 +5918,7 @@ class AutoRefillTests(unittest.TestCase):
                 with app.db_connection() as database:
                     self.insert_run(database, "root11111111", "root-one")
                     self.insert_run(database, "root22222222", "root-two")
-                    for number in range(6):
+                    for number in range(3):
                         self.insert_run(
                             database,
                             f"full{number:08d}",
@@ -5037,15 +5926,6 @@ class AutoRefillTests(unittest.TestCase):
                             source_run_id="root22222222",
                         )
                     parent_id = "root11111111"
-                    for number in range(4):
-                        child_id = f"done{number:08d}"
-                        self.insert_run(
-                            database,
-                            child_id,
-                            f"done-{number}",
-                            source_run_id=parent_id,
-                        )
-                        parent_id = child_id
                     self.insert_run(
                         database,
                         "active111111",
@@ -5058,7 +5938,79 @@ class AutoRefillTests(unittest.TestCase):
                 candidate = app.auto_refill_iteration_candidate()
 
             self.assertEqual(candidate["id"], "root11111111")
-            self.assertEqual(candidate["iteration_count"], 5)
+            self.assertEqual(candidate["iteration_count"], 1)
+
+    def test_score_capped_root_is_migrated_and_kept_as_refill_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root):
+                app.initialize_database()
+                with app.db_connection() as database:
+                    self.insert_run(
+                        database,
+                        "scorecap1111",
+                        "score-cap-root",
+                        phase="discarded",
+                    )
+                    self.insert_run(
+                        database,
+                        "discarded111",
+                        "difficulty-rejected-root",
+                        phase="discarded",
+                    )
+                    database.execute(
+                        """UPDATE runs SET status_detail = ? WHERE id = ?""",
+                        (
+                            "第 1 轮五维总分为 22，超过收录上限 21 分；本轮不可导出",
+                            "scorecap1111",
+                        ),
+                    )
+                    database.execute(
+                        """UPDATE runs SET status_detail = ? WHERE id = ?""",
+                        (
+                            "实际难度复评为中等，低于困难；第 1 轮不可导出",
+                            "discarded111",
+                        ),
+                    )
+
+                app.initialize_database()
+                migrated = app.serialize_run(app.run_row("scorecap1111"))
+                rejected = app.serialize_run(app.run_row("discarded111"))
+                candidate = app.auto_refill_iteration_candidate("Feature 迭代")
+
+            self.assertEqual(migrated["phase"], "score_capped")
+            self.assertIn("仓库可作为新补题来源", migrated["status_detail"])
+            self.assertEqual(rejected["phase"], "discarded")
+            self.assertIsNotNone(candidate)
+            self.assertEqual(candidate["id"], "scorecap1111")
+
+    def test_candidate_prefers_repository_with_less_prompt_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root):
+                app.initialize_database()
+                with app.db_connection() as database:
+                    self.insert_run(database, "crowded11111", "crowded-root")
+                    self.insert_run(database, "fresh1111111", "fresh-root")
+
+                def repository_history(candidate):
+                    if candidate["repo_name"] == "crowded-root":
+                        return [{"reference_id": str(number)} for number in range(8)]
+                    return [{"reference_id": "one"}]
+
+                with mock.patch.object(
+                    app,
+                    "same_repository_submission_history",
+                    side_effect=repository_history,
+                ):
+                    candidate = app.auto_refill_iteration_candidate("Feature 迭代")
+
+            self.assertEqual(candidate["id"], "fresh1111111")
+            self.assertEqual(candidate["repository_history_count"], 1)
 
     def test_refill_and_manual_iteration_skip_project_rejected_by_solo_qa(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5103,6 +6055,39 @@ class AutoRefillTests(unittest.TestCase):
                     app.validate_iteration_lineage_type(
                         "rejected2222", "Feature 迭代"
                     )
+
+    def test_rule_c_exclusion_is_persistent_per_repository_and_task_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root):
+                app.initialize_database()
+                with app.db_connection() as database:
+                    self.insert_run(database, "blocked11111", "blocked-root")
+                    self.insert_run(database, "eligible1111", "eligible-root")
+                app.exclude_iteration_source(
+                    "blocked11111", "Feature 迭代", "与 #123 中度雷同"
+                )
+
+                self.assertIn(
+                    "#123",
+                    app.iteration_source_exclusion_reason(
+                        "blocked11111", "Feature 迭代"
+                    ),
+                )
+                self.assertIn(
+                    "#123",
+                    app.iteration_source_exclusion_reason(
+                        "blocked11111", "Bug 修复"
+                    ),
+                )
+                with self.assertRaisesRegex(app.WorkflowError, "规则 C"):
+                    app.validate_iteration_lineage_type(
+                        "blocked11111", "Feature 迭代"
+                    )
+                candidate = app.auto_refill_iteration_candidate("Feature 迭代")
+                self.assertEqual(candidate["id"], "eligible1111")
 
     def test_terminal_iteration_without_product_does_not_block_refill_lineage(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5176,11 +6161,10 @@ class AutoRefillTests(unittest.TestCase):
                 )
                 self.assertEqual(state["iteration_count"], 2)
                 self.assertEqual(state["new_module_count"], 1)
-                with self.assertRaisesRegex(app.WorkflowError, "不能连续"):
+                with self.assertRaisesRegex(app.WorkflowError, "最多追加 1 个"):
                     app.validate_iteration_lineage_type(
                         "module111111", "0-1 代码生成"
                     )
-
                 with app.db_connection() as database:
                     self.insert_run(
                         database,
@@ -5188,19 +6172,12 @@ class AutoRefillTests(unittest.TestCase):
                         "feature-two",
                         source_run_id="module111111",
                     )
-                    self.insert_run(
-                        database,
-                        "module222222",
-                        "module-two",
-                        source_run_id="feature22222",
-                        task_type="0-1 代码生成",
-                    )
-                with self.assertRaisesRegex(app.WorkflowError, "最多创建 2 个"):
+                with self.assertRaisesRegex(app.WorkflowError, "最多创建 3 个"):
                     app.validate_iteration_lineage_type(
-                        "module222222", "0-1 代码生成"
+                        "feature22222", "Feature 迭代"
                     )
 
-    def test_automatic_type_interleaves_at_most_two_nonconsecutive_modules(self):
+    def test_automatic_type_alternates_feature_and_bug_without_fixed_slots(self):
         self.assertEqual(
             app.automatic_iteration_task_type(
                 {
@@ -5224,51 +6201,222 @@ class AutoRefillTests(unittest.TestCase):
         self.assertEqual(
             app.automatic_iteration_task_type(
                 {
-                    "iteration_count": 4,
-                    "new_module_count": 1,
-                    "last_iteration_task_type": "Feature 迭代",
+                    "iteration_count": 1,
+                    "new_module_count": 0,
+                    "last_iteration_task_type": "Bug 修复",
                 }
+            ),
+            "Feature 迭代",
+        )
+
+    def test_balanced_refill_always_selects_the_least_represented_type(self):
+        self.assertEqual(
+            app.balanced_auto_refill_task_type(
+                {"0-1 代码生成": 10, "Feature 迭代": 10, "Bug 修复": 10}
+            ),
+            "0-1 代码生成",
+        )
+        self.assertEqual(
+            app.balanced_auto_refill_task_type(
+                {"0-1 代码生成": 10, "Feature 迭代": 7, "Bug 修复": 9}
+            ),
+            "Feature 迭代",
+        )
+        self.assertEqual(
+            app.balanced_auto_refill_task_type(
+                {"0-1 代码生成": 10, "Feature 迭代": 10, "Bug 修复": 6}
             ),
             "Bug 修复",
         )
-        self.assertEqual(
-            app.automatic_iteration_task_type(
-                {
-                    "iteration_count": 2,
-                    "new_module_count": 0,
-                    "last_iteration_task_type": "Feature 迭代",
-                }
-            ),
-            "0-1 代码生成",
-        )
-        self.assertEqual(
-            app.automatic_iteration_task_type(
-                {
-                    "iteration_count": 5,
-                    "new_module_count": 1,
-                    "last_iteration_task_type": "Feature 迭代",
-                }
-            ),
-            "0-1 代码生成",
-        )
-        for state in (
-            {
-                "iteration_count": 2,
-                "new_module_count": 1,
-                "last_iteration_task_type": "0-1 代码生成",
-            },
-            {
-                "iteration_count": 5,
-                "new_module_count": 2,
-                "last_iteration_task_type": "Feature 迭代",
-            },
-        ):
-            with self.subTest(state=state):
-                self.assertEqual(
-                    app.automatic_iteration_task_type(state), "Feature 迭代"
-                )
 
-    def test_refill_prefers_feature_iteration_then_falls_back_to_new_0_1(self):
+    def test_bugfix_generation_cap_uses_a_nonleading_feature_slot(self):
+        counts = {"0-1 代码生成": 7, "Feature 迭代": 5, "Bug 修复": 4}
+        source = {"id": "root11111111", "repo_name": "root-one", "iteration_count": 2}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root):
+                app.initialize_database()
+                app.set_auto_refill({"enabled": True, "project_directory": "team-a"})
+                with mock.patch.object(
+                    app, "auto_refill_capacity_backoff_remaining", return_value=0
+                ), mock.patch.object(
+                    app, "automatic_refill_occupancy", return_value=2
+                ), mock.patch.object(
+                    app, "auto_refill_task_type_counts", return_value=counts
+                ), mock.patch.object(
+                    app,
+                    "active_iteration_generation_count",
+                    return_value=app.AUTO_REFILL_MAX_PARALLEL_BUGFIX_GENERATIONS,
+                ), mock.patch.object(
+                    app, "auto_refill_iteration_candidate", return_value=source
+                ) as select, mock.patch.object(
+                    app,
+                    "queue_refill_iteration",
+                    return_value={"status": "generating", "task_type": "Feature 迭代"},
+                ) as queue:
+                    result = app.automatic_refill_once()
+
+        self.assertEqual(result["action"], "iteration")
+        select.assert_called_once_with("Feature 迭代")
+        queue.assert_called_once_with(source["id"], "Feature 迭代")
+
+    def test_bugfix_generation_cap_waits_instead_of_increasing_a_large_gap(self):
+        counts = {"0-1 代码生成": 10, "Feature 迭代": 10, "Bug 修复": 5}
+        self.assertIsNone(
+            app.fallback_auto_refill_task_type(counts, {"Bug 修复"})
+        )
+
+    def test_capacity_backoff_releases_scheduler_before_counting_new_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root), mock.patch.object(
+                app.time, "time", return_value=1_000
+            ):
+                app.initialize_database()
+                app.set_auto_refill({"enabled": True, "project_directory": "team-a"})
+                first_delay = app.record_auto_refill_capacity_backoff("capacity one")
+                first_remaining = app.auto_refill_capacity_backoff_remaining()
+                second_delay = app.record_auto_refill_capacity_backoff("capacity two")
+                second_remaining = app.auto_refill_capacity_backoff_remaining()
+
+                with mock.patch.object(app, "automatic_refill_occupancy") as occupancy:
+                    result = app.automatic_refill_once()
+
+        self.assertEqual(first_delay, 60)
+        self.assertEqual(first_remaining, 60)
+        self.assertEqual(second_delay, 180)
+        self.assertEqual(second_remaining, 180)
+        self.assertEqual(result["action"], "waiting_for_upstream_capacity")
+        occupancy.assert_not_called()
+
+    def test_refill_configuration_exposes_ten_ten_ten_mix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root):
+                app.initialize_database()
+                configuration = app.auto_refill_configuration()
+
+        self.assertEqual(
+            configuration["task_mix_target"],
+            {"0-1 代码生成": 10, "Feature 迭代": 10, "Bug 修复": 10},
+        )
+        self.assertEqual(
+            configuration["task_type_counts"],
+            {"0-1 代码生成": 0, "Feature 迭代": 0, "Bug 修复": 0},
+        )
+        self.assertEqual(configuration["next_balanced_task_type"], "0-1 代码生成")
+
+    def test_mix_counts_ignore_turns_before_current_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                app.write_settings(
+                    {"task_mix_count_started_at": "2026-09-16 12:00:00 +0800"}
+                )
+                evaluation = sample_evaluation()
+                evaluation["task_difficulty"] = "困难"
+                review_result = json.dumps(
+                    {"evaluation": evaluation}, ensure_ascii=False
+                )
+                with app.db_connection() as database:
+                    for run_id, created_at, task_type in (
+                        (
+                            "mix-old00001",
+                            "2026-09-16 11:59:59 +0800",
+                            "0-1 代码生成",
+                        ),
+                        (
+                            "mix-new00001",
+                            "2026-09-16 12:00:01 +0800",
+                            "Feature 迭代",
+                        ),
+                    ):
+                        database.execute(
+                            """INSERT INTO runs(
+                                 id, repo_name, repo_path, phase, task_type,
+                                 first_prompt, verification_commands, created_at, updated_at
+                               ) VALUES (?, ?, ?, 'complete', ?, '测试题面', '[]', ?, ?)""",
+                            (run_id, run_id, str(root / run_id), task_type, created_at, created_at),
+                        )
+                        database.execute(
+                            """INSERT INTO run_turns(
+                                 run_id, turn_number, intent_type, prompt, status,
+                                 review_result, verification, created_at, updated_at
+                               ) VALUES (?, 1, ?, '测试题面', 'complete', ?, '[]', ?, ?)""",
+                            (run_id, task_type, review_result, created_at, created_at),
+                        )
+
+                counts = app.auto_refill_task_type_counts()
+
+        self.assertEqual(
+            counts,
+            {"0-1 代码生成": 0, "Feature 迭代": 1, "Bug 修复": 0},
+        )
+
+    def test_mix_counts_eligible_turns_inside_a_discarded_chain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                app.write_settings({"task_mix_count_started_at": "2000-01-01 00:00:00"})
+                app.write_settings({"collection_score_started_at": "2000-01-01 00:00:00"})
+                timestamp = app.now_text()
+                eligible = sample_evaluation()
+                for key, score in {
+                    "delivery": 4,
+                    "instruction_following": 4,
+                    "planning": 5,
+                    "reasoning": 4,
+                    "execution": 4,
+                }.items():
+                    eligible[key]["score"] = score
+                rejected = sample_evaluation()
+                rejected["task_difficulty"] = "中等"
+                with app.db_connection() as database:
+                    database.execute(
+                        """INSERT INTO runs(
+                             id, repo_name, repo_path, phase, task_type,
+                             first_prompt, verification_commands, created_at, updated_at
+                           ) VALUES ('mix-discarded', 'mix-discarded', ?, 'discarded',
+                                     '0-1 代码生成', '测试题面', '[]', ?, ?)""",
+                        (str(root / "mix-discarded"), timestamp, timestamp),
+                    )
+                    for number, intent, evaluation in (
+                        (1, "0-1 代码生成", eligible),
+                        (2, "Bug 修复", rejected),
+                    ):
+                        database.execute(
+                            """INSERT INTO run_turns(
+                                 run_id, turn_number, intent_type, prompt, status,
+                                 review_result, verification, created_at, updated_at
+                               ) VALUES ('mix-discarded', ?, ?, '测试题面', 'complete',
+                                         ?, '[]', ?, ?)""",
+                            (
+                                number,
+                                intent,
+                                json.dumps({"evaluation": evaluation}, ensure_ascii=False),
+                                timestamp,
+                                timestamp,
+                            ),
+                        )
+
+                counts = app.auto_refill_task_type_counts()
+
+        self.assertEqual(counts["0-1 代码生成"], 1)
+        self.assertEqual(counts["Bug 修复"], 0)
+
+    def test_refill_prefers_feature_iteration_then_bootstraps_a_valid_baseline(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
@@ -5278,6 +6426,8 @@ class AutoRefillTests(unittest.TestCase):
                 app.set_auto_refill({"enabled": True, "project_directory": "team-a"})
                 source = {"id": "root11111111", "repo_name": "root-one", "iteration_count": 2}
                 with mock.patch.object(app, "automatic_refill_occupancy", return_value=1), mock.patch.object(
+                    app, "balanced_auto_refill_task_type", return_value="Feature 迭代"
+                ), mock.patch.object(
                     app, "auto_refill_iteration_candidate", return_value=source
                 ), mock.patch.object(
                     app,
@@ -5287,26 +6437,53 @@ class AutoRefillTests(unittest.TestCase):
                     iteration = app.automatic_refill_once()
 
                 self.assertEqual(iteration["action"], "iteration")
-                queue.assert_called_once_with(source["id"])
+                queue.assert_called_once_with(source["id"], "Feature 迭代")
 
-                created = {"id": "new01111111", "project_number": "0009"}
                 with mock.patch.object(app, "automatic_refill_occupancy", return_value=1), mock.patch.object(
+                    app, "balanced_auto_refill_task_type", return_value="Feature 迭代"
+                ), mock.patch.object(
                     app, "auto_refill_iteration_candidate", return_value=None
                 ), mock.patch.object(
-                    app, "create_automatic_run", return_value=created
+                    app, "auto_refill_task_type_counts",
+                    return_value={"0-1 代码生成": 2, "Feature 迭代": 1, "Bug 修复": 2},
+                ), mock.patch.object(
+                    app, "create_automatic_run",
+                    return_value={"id": "new-root", "project_number": "0101"},
                 ) as create, mock.patch.object(app, "add_event"):
-                    new_task = app.automatic_refill_once()
+                    bootstrap = app.automatic_refill_once()
 
-                self.assertEqual(new_task["action"], "0-1")
-                create.assert_called_once_with(
-                    {"project_directory": "team-a", "_auto_refill": True}
-                )
+                self.assertEqual(bootstrap["action"], "0-1")
+                self.assertIn("Feature 迭代", bootstrap["detail"])
+                create.assert_called_once()
+
+    def test_refill_waits_when_bootstrap_would_exceed_mix_gap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ), mock.patch.object(app, "PROJECTS_ROOT", root):
+                app.initialize_database()
+                app.set_auto_refill({"enabled": True, "project_directory": "team-a"})
+                with mock.patch.object(app, "automatic_refill_occupancy", return_value=1), mock.patch.object(
+                    app, "balanced_auto_refill_task_type", return_value="Feature 迭代"
+                ), mock.patch.object(
+                    app, "auto_refill_iteration_candidate", return_value=None
+                ), mock.patch.object(
+                    app, "auto_refill_task_type_counts",
+                    return_value={"0-1 代码生成": 6, "Feature 迭代": 2, "Bug 修复": 5},
+                ), mock.patch.object(app, "create_automatic_run") as create:
+                    waiting = app.automatic_refill_once()
+
+                self.assertEqual(waiting["action"], "waiting_for_balanced_baseline")
+                self.assertEqual(waiting["task_type"], "Feature 迭代")
+                self.assertIn("类型差距", waiting["detail"])
+                create.assert_not_called()
 
     def test_refill_queue_uses_the_interleaved_task_type(self):
         source = {
             "id": "root11111111",
             "repo_name": "root-one",
-            "iteration_count": 2,
+            "iteration_count": 1,
             "new_module_count": 0,
             "last_iteration_task_type": "Feature 迭代",
         }
@@ -5330,13 +6507,13 @@ class AutoRefillTests(unittest.TestCase):
             ) as thread:
                 job = app.queue_refill_iteration(source["id"])
 
-            self.assertEqual(job["task_type"], "0-1 代码生成")
+            self.assertEqual(job["task_type"], "Bug 修复")
             event.assert_called_once_with(
-                source["id"], "自动补题：开始生成第 3 轮 0-1 代码生成"
+                source["id"], "自动补题：开始生成第 2 轮 Bug 修复"
             )
             thread.assert_called_once_with(
                 target=app.automatic_iteration_worker,
-                args=(source["id"], "0-1 代码生成", False, True),
+                args=(source["id"], "Bug 修复", False, True),
                 daemon=True,
             )
         finally:
@@ -5444,16 +6621,32 @@ class AutoRefillTests(unittest.TestCase):
         self.assertIn("enable_after_hours", javascript)
         self.assertIn("disable_after_hours", javascript)
         self.assertIn("Bug 修复", javascript)
-        self.assertIn("Feature、Bug 修复和完整模块", html)
+        self.assertIn("第一次 Feature 优先完整模块", html)
         self.assertIn("现有问题整理（Bug 修复）", javascript)
         self.assertIn("/api/settings/auto-refill", javascript)
         self.assertIn('id="max-parallel-runs"', html)
         self.assertEqual(html.count('<option value="6">6</option>'), 1)
         self.assertIn("async function updateMaxParallel()", javascript)
         self.assertIn("/api/settings/max-parallel", javascript)
+        self.assertIn('<option value="score_capped">高分不收录</option>', html)
+        self.assertIn('score_capped: ["高分不收录", "warning"]', javascript)
+        self.assertIn('["complete", "score_capped"].includes(run.phase)', javascript)
+        self.assertIn('<option value="score_cap">五维总分超限</option>', html)
 
 
 class IterationGenerationTests(unittest.TestCase):
+    def concept(self, task_type="Feature 迭代"):
+        return {
+            "task_type": task_type,
+            "concept_summary": "为异常批次增加带版本的处置决策闭环",
+            "business_object": "批次处置决定",
+            "primary_operation": "发起处置并提交审核",
+            "state_lifecycle": "待审核、已生效和因证据变化失效",
+            "failure_boundary": "版本冲突或证据不足时不改变当前结论",
+            "modules": ["领域状态", "服务接口", "操作页面"],
+            "acceptance_outcomes": ["审核后形成结论", "冲突提交不写入"],
+        }
+
     def candidate(self):
         return {
             "task_type": "Feature 迭代",
@@ -5474,6 +6667,200 @@ class IterationGenerationTests(unittest.TestCase):
                 "冲突交接被服务端阻止",
             ],
         }
+
+    def test_concept_card_uses_routine_review_before_full_prompt(self):
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "demo",
+            "same_repository_history": [{"reference_id": "123", "prompt": "旧题"}],
+            "iteration_policy": {"iteration_count": 0, "feature_count": 0},
+            "_feature_shape_mode": "complete_module",
+        }
+        with mock.patch.object(
+            app, "run_codex_structured", return_value=self.concept()
+        ) as codex:
+            result = app.run_codex_iteration_concept(context, "Feature 迭代")
+
+        self.assertEqual(result["business_object"], "批次处置决定")
+        self.assertEqual(
+            codex.call_args.kwargs["reasoning_effort"],
+            app.CODEX_ROUTINE_REASONING_EFFORT,
+        )
+        self.assertIn(
+            "第一次 Feature，必须优先设计完整新模块",
+            codex.call_args.args[0],
+        )
+        self.assertEqual(codex.call_args.args[3], "iteration-concept")
+
+    def test_third_iteration_gate_requires_three_novel_dimensions(self):
+        context = {"repo_path": "/tmp/existing-project"}
+        gate = {
+            "approved": False,
+            "new_business_object": True,
+            "new_state_lifecycle": False,
+            "new_main_user_flow": True,
+            "closest_history_reference": "123",
+            "reason": "状态生命周期仍沿用历史处置流",
+        }
+        with mock.patch.object(app, "run_codex_structured", return_value=gate) as codex:
+            result = app.run_codex_third_iteration_gate(
+                context, self.concept(), "Feature 迭代"
+            )
+
+        self.assertFalse(result["approved"])
+        self.assertEqual(codex.call_args.args[3], "third-iteration-gate")
+        self.assertEqual(
+            codex.call_args.kwargs["reasoning_effort"], app.CODEX_REASONING_EFFORT
+        )
+
+    def test_third_followup_stops_when_strict_gate_finds_reused_lifecycle(self):
+        candidate = self.candidate()
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "demo",
+            "same_repository_history": [{"reference_id": "123", "prompt": "旧题"}],
+            "iteration_policy": {"iteration_count": 2},
+        }
+        source = {
+            "phase": "complete",
+            "container_cleaned": 1,
+            "repo_url": "https://example.invalid/demo",
+            "first_prompt_id": "prompt-1",
+        }
+        distinct = {
+            "overlap_level": "none",
+            "closest_history_reference": "",
+            "same_business_object": False,
+            "same_operation_archetype": False,
+            "same_validation_family": False,
+            "reason": "初步概念未直接重叠",
+        }
+        rejected_gate = {
+            "approved": False,
+            "new_business_object": True,
+            "new_state_lifecycle": False,
+            "new_main_user_flow": True,
+            "closest_history_reference": "123",
+            "reason": "状态生命周期仍沿用历史处置流",
+        }
+        with mock.patch.object(app, "run_row", return_value=source), mock.patch.object(
+            app, "iteration_project_context", return_value=context
+        ), mock.patch.object(
+            app, "run_codex_iteration_concept", return_value=self.concept()
+        ), mock.patch.object(
+            app, "run_codex_same_repository_overlap_validation", return_value=distinct
+        ), mock.patch.object(
+            app, "run_codex_third_iteration_gate", return_value=rejected_gate
+        ), mock.patch.object(
+            app, "run_codex_iteration_generation", return_value=candidate
+        ) as generate:
+            with self.assertRaisesRegex(
+                app.SameRepositoryOverlapError, "第 3 条严格预检未通过"
+            ):
+                app.generate_iteration_candidate("source111111")
+
+        generate.assert_not_called()
+
+    def test_distinct_concept_is_bound_into_full_prompt_generation(self):
+        candidate = self.candidate()
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "demo",
+            "same_repository_history": [{"reference_id": "123", "prompt": "旧题"}],
+            "iteration_policy": {"iteration_count": 0, "feature_count": 0},
+        }
+        source = {
+            "phase": "complete",
+            "container_cleaned": 1,
+            "repo_url": "https://example.invalid/demo",
+            "first_prompt_id": "prompt-1",
+        }
+        distinct = {
+            "overlap_level": "none",
+            "closest_history_reference": "",
+            "same_business_object": False,
+            "same_operation_archetype": False,
+            "same_validation_family": False,
+            "reason": "主流程不同",
+        }
+        with mock.patch.object(app, "run_row", return_value=source), mock.patch.object(
+            app, "iteration_project_context", return_value=context
+        ), mock.patch.object(
+            app, "run_codex_iteration_concept", return_value=self.concept()
+        ), mock.patch.object(
+            app, "run_codex_iteration_generation", return_value=candidate
+        ) as generate, mock.patch.object(
+            app, "run_codex_same_repository_overlap_validation", return_value=distinct
+        ) as overlap, mock.patch.object(
+            app, "run_codex_iteration_validation", return_value=self.review_result()
+        ):
+            result = app.generate_iteration_candidate("source111111")
+
+        self.assertEqual(result["prompt"], candidate["prompt"])
+        self.assertEqual(overlap.call_count, 2)
+        generated_context = generate.call_args.args[0]
+        self.assertEqual(
+            generated_context["_approved_concept"]["business_object"],
+            "批次处置决定",
+        )
+        self.assertEqual(
+            generated_context["_feature_shape_mode"], "complete_module"
+        )
+
+    def test_first_feature_falls_back_to_smooth_only_after_module_overlap(self):
+        candidate = self.candidate()
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "demo",
+            "same_repository_history": [{"reference_id": "123", "prompt": "旧题"}],
+            "iteration_policy": {"iteration_count": 0, "feature_count": 0},
+        }
+        source = {
+            "phase": "complete",
+            "container_cleaned": 1,
+            "repo_url": "https://example.invalid/demo",
+            "first_prompt_id": "prompt-1",
+        }
+        overlap = {
+            "overlap_level": "medium",
+            "closest_history_reference": "123",
+            "same_business_object": True,
+            "same_operation_archetype": True,
+            "same_validation_family": False,
+            "reason": "完整模块仍复用了旧对象",
+        }
+        distinct = {
+            "overlap_level": "none",
+            "closest_history_reference": "",
+            "same_business_object": False,
+            "same_operation_archetype": False,
+            "same_validation_family": False,
+            "reason": "平滑后备路径采用不同结果",
+        }
+        with mock.patch.object(app, "run_row", return_value=source), mock.patch.object(
+            app, "iteration_project_context", return_value=context
+        ), mock.patch.object(
+            app, "run_codex_iteration_concept", return_value=self.concept()
+        ) as concept, mock.patch.object(
+            app,
+            "run_codex_same_repository_overlap_validation",
+            side_effect=[overlap, distinct, distinct],
+        ), mock.patch.object(
+            app, "run_codex_iteration_generation", return_value=candidate
+        ) as generate, mock.patch.object(
+            app, "run_codex_iteration_validation", return_value=self.review_result()
+        ), mock.patch.object(app, "add_event") as event:
+            result = app.generate_iteration_candidate("source111111")
+
+        self.assertEqual(result["prompt"], candidate["prompt"])
+        self.assertEqual(concept.call_count, 2)
+        self.assertEqual(generate.call_count, 1)
+        generated_context = generate.call_args.args[0]
+        self.assertEqual(
+            generated_context["_feature_shape_mode"], "smooth_fallback"
+        )
+        self.assertIn("完整模块预检未通过", generate.call_args.args[1])
+        event.assert_called_once()
 
     def new_module_candidate(self):
         candidate = self.candidate()
@@ -5500,7 +6887,7 @@ class IterationGenerationTests(unittest.TestCase):
             "focus_area": "样本交接确认",
             "main_user_flow": "接收人输入接收码并确认样本位置",
             "scope_summary": "样本交接确认集中在接收人输入接收码、查看交接状态并确认样本位置的流程",
-            "modules": ["交接服务", "接收页面"],
+            "modules": ["交接服务", "接收接口", "接收页面"],
             "confirmed_bugs": [
                 {
                     "title": "重复确认会移动两次",
@@ -5551,6 +6938,13 @@ class IterationGenerationTests(unittest.TestCase):
             "approved": approved,
             "reasons": list(reasons or []),
             "task_type": task_type,
+            "difficulty_review": {
+                "level": "困难",
+                "hard_drivers": ["处置版本状态机"],
+                "human_work_reasons": ["需要跨层保持状态与证据的一致性"],
+                "inflated_label_risk": False,
+                "one_hour_feasible": True,
+            },
             "scope_review": {
                 "engineering_core_count": 1,
                 "modules": candidate["modules"],
@@ -5684,13 +7078,15 @@ class IterationGenerationTests(unittest.TestCase):
             schema["properties"]["new_runtime_components"]["maxItems"], 1
         )
         self.assertEqual(schema["properties"]["complex_mechanisms"]["maxItems"], 1)
-        self.assertEqual(schema["properties"]["acceptance_scenarios"]["minItems"], 3)
-        self.assertEqual(schema["properties"]["acceptance_scenarios"]["maxItems"], 4)
+        self.assertNotIn("minItems", schema["properties"]["acceptance_scenarios"])
+        self.assertNotIn("maxItems", schema["properties"]["acceptance_scenarios"])
         self.assertIn("engineering_core", schema["required"])
         self.assertEqual(schema["properties"]["api_or_actions"]["maxItems"], 2)
         self.assertEqual(schema["properties"]["new_state_sets"]["maxItems"], 1)
         self.assertIn("整个需求只能围绕一个工程核心", generation_prompt)
         self.assertIn("300 至 480", generation_prompt)
+        self.assertIn("约 45 分钟", generation_prompt)
+        self.assertIn("约 15 分钟", generation_prompt)
 
     def test_feature_generation_receives_history_and_uses_small_scope_budget(self):
         context = {
@@ -5708,6 +7104,12 @@ class IterationGenerationTests(unittest.TestCase):
                     "prompt": "已有的第一轮扩展题面",
                 },
             ],
+            "same_repository_history": [
+                {
+                    "remote_submission_id": "11405",
+                    "prompt": "同仓库已提交的全清或不清残留推演题面",
+                }
+            ],
         }
         with mock.patch.object(
             app, "run_codex_structured", return_value=self.candidate()
@@ -5716,16 +7118,51 @@ class IterationGenerationTests(unittest.TestCase):
 
         generation_prompt, schema = codex.call_args.args[:2]
         self.assertIn("已有的第一轮扩展题面", generation_prompt)
+        self.assertIn("同仓库已提交的全清或不清残留推演题面", generation_prompt)
         self.assertIn("iteration_history", generation_prompt)
+        self.assertIn(app.SAME_REPOSITORY_PROMPT_GUIDANCE, generation_prompt)
         self.assertEqual(schema["properties"]["modules"]["maxItems"], 4)
         self.assertEqual(
             schema["properties"]["new_runtime_components"]["maxItems"], 0
         )
         self.assertEqual(schema["properties"]["complex_mechanisms"]["maxItems"], 1)
-        self.assertEqual(schema["properties"]["acceptance_scenarios"]["minItems"], 3)
-        self.assertEqual(schema["properties"]["acceptance_scenarios"]["maxItems"], 4)
+        self.assertNotIn("minItems", schema["properties"]["acceptance_scenarios"])
+        self.assertNotIn("maxItems", schema["properties"]["acceptance_scenarios"])
         self.assertIn("engineering_core", schema["required"])
         self.assertIn("300 至 480", generation_prompt)
+        self.assertIn("约 45 分钟", generation_prompt)
+        self.assertIn("约 15 分钟", generation_prompt)
+        self.assertIn("完整模块仍记作 Feature 迭代", generation_prompt)
+        self.assertIn("现有流程扩展与完整模块两种形态", generation_prompt)
+        self.assertIn("不按数量裁决", generation_prompt)
+
+    def test_first_feature_generation_and_review_require_complete_module(self):
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "demo",
+            "_feature_shape_mode": "complete_module",
+            "iteration_policy": {"iteration_count": 0, "feature_count": 0},
+        }
+        candidate = self.candidate()
+        with mock.patch.object(
+            app, "run_codex_structured", return_value=candidate
+        ) as generation:
+            app.run_codex_iteration_generation(context)
+
+        generation_prompt = generation.call_args.args[0]
+        self.assertIn("必须先生成完整新模块", generation_prompt)
+        self.assertIn("不得改回原主流程的平滑扩展", generation_prompt)
+
+        with mock.patch.object(
+            app,
+            "run_codex_structured",
+            return_value=self.review_result(),
+        ) as review:
+            app.run_codex_iteration_validation(context, candidate)
+
+        review_prompt = review.call_args.args[0]
+        self.assertIn("候选必须是完整新模块", review_prompt)
+        self.assertIn("仍在扩展原题计算", review_prompt)
 
     def test_feature_scope_and_history_similarity_are_hard_validated(self):
         candidate = self.candidate()
@@ -5740,8 +7177,7 @@ class IterationGenerationTests(unittest.TestCase):
 
         candidate = self.candidate()
         candidate["acceptance_scenarios"].extend(["额外场景一", "额外场景二"])
-        with self.assertRaisesRegex(app.WorkflowError, "验收场景必须为 3 至 4 项"):
-            app.validate_generated_iteration(candidate)
+        self.assertEqual(app.validate_generated_iteration(candidate), candidate["prompt"])
 
         candidate = self.candidate()
         with self.assertRaisesRegex(app.WorkflowError, "历史第 2 轮过于相似"):
@@ -5785,8 +7221,10 @@ class IterationGenerationTests(unittest.TestCase):
 
         candidate = self.new_module_candidate()
         candidate["acceptance_scenarios"].extend(["失败重试", "崩溃回收"])
-        with self.assertRaisesRegex(app.WorkflowError, "验收场景必须为 3 至 4 项"):
-            app.validate_generated_iteration(candidate, "0-1 代码生成")
+        self.assertEqual(
+            app.validate_generated_iteration(candidate, "0-1 代码生成"),
+            candidate["prompt"],
+        )
 
         candidate = self.new_module_candidate()
         candidate["prompt"] += "继续增加额外功能。" * 20
@@ -5794,7 +7232,16 @@ class IterationGenerationTests(unittest.TestCase):
             app.validate_generated_iteration(candidate, "0-1 代码生成")
 
     def test_iteration_review_rejects_mechanical_ai_style(self):
-        context = {"repo_path": "/tmp/existing-project", "repo_name": "demo"}
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "demo",
+            "same_repository_history": [
+                {
+                    "remote_submission_id": "11217",
+                    "prompt": "历史题面已经提供微调频点建议",
+                }
+            ],
+        }
         with mock.patch.object(
             app,
             "run_codex_structured",
@@ -5804,7 +7251,231 @@ class IterationGenerationTests(unittest.TestCase):
 
         review_prompt = codex.call_args.args[0]
         self.assertIn(app.DEVELOPER_PROMPT_STYLE_GUIDANCE, review_prompt)
+        self.assertIn(app.SAME_REPOSITORY_PROMPT_GUIDANCE, review_prompt)
+        self.assertIn("历史题面已经提供微调频点建议", review_prompt)
+        self.assertIn("中度雷同就属于不合格", review_prompt)
         self.assertIn("即使技术内容完整也必须 approved=false", review_prompt)
+
+    def test_same_repository_overlap_review_checks_operation_and_validation_families(self):
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "evacuation-band-gate-attribution",
+            "same_repository_history": [
+                {
+                    "remote_submission_id": "12694",
+                    "task_type": "Feature 迭代",
+                    "prompt": "建立疏散名册记录，按唯一编号创建和查询，并返回 422、409 与 404。",
+                },
+                {
+                    "remote_submission_id": "12781",
+                    "task_type": "Bug 修复",
+                    "prompt": "修复跑道评估请求中的年份极值校验。",
+                },
+            ],
+        }
+        overlap = {
+            "overlap_level": "medium",
+            "closest_history_reference": "12694",
+            "same_business_object": False,
+            "same_operation_archetype": True,
+            "same_validation_family": False,
+            "reason": "记录对象不同，但持久化、创建查询和错误反馈流程相同",
+        }
+        with mock.patch.object(
+            app, "run_codex_structured", return_value=overlap
+        ) as codex:
+            result = app.run_codex_same_repository_overlap_validation(
+                context, self.candidate(), "Feature 迭代"
+            )
+
+        self.assertEqual(result, overlap)
+        review_prompt = codex.call_args.args[0]
+        self.assertIn("不同记录对象", review_prompt)
+        self.assertIn("同一操作原型", review_prompt)
+        self.assertIn("同一校验缺陷家族", review_prompt)
+        self.assertIn("年份、截止时间、重复值、非有限数", review_prompt)
+        self.assertIn("同一个无状态服务", review_prompt)
+        self.assertIn("一个计算中位数、另一个折叠事件", review_prompt)
+        self.assertIn("12694", review_prompt)
+        self.assertEqual(
+            codex.call_args.args[4], app.SAME_REPOSITORY_OVERLAP_TIMEOUT_SECONDS
+        )
+        self.assertEqual(
+            codex.call_args.kwargs["reasoning_effort"],
+            app.CODEX_ROUTINE_REASONING_EFFORT,
+        )
+
+    def test_same_repository_overlap_blocks_isolated_persistent_sidecar_locally(self):
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "sheet-bend-flat-pattern",
+            "same_repository_history": [
+                {
+                    "reference_id": "13742",
+                    "remote_submission_id": "13742",
+                    "task_type": "Feature 迭代",
+                    "prompt": (
+                        "在现有页面加入独立的来料抽检视图，抽检结论不写入或改变展开结果。"
+                        "抽检模型与 SQLite 仓储把批次和判定状态写入数据卷。"
+                    ),
+                }
+            ],
+        }
+        candidate = self.candidate()
+        candidate["prompt"] = (
+            "在现有标签页中加入班次交接草稿，输入后自动保存。"
+            "草稿只保存在当前浏览器，不建立服务端记录，也不改动展开计算。"
+        )
+
+        with mock.patch.object(app, "run_codex_structured") as codex:
+            result = app.run_codex_same_repository_overlap_validation(
+                context, candidate, "Feature 迭代"
+            )
+
+        codex.assert_not_called()
+        self.assertEqual(result["overlap_level"], "medium")
+        self.assertEqual(result["closest_history_reference"], "13742")
+        self.assertTrue(result["same_operation_archetype"])
+        self.assertIn("服务端与浏览器存储", result["reason"])
+        self.assertIn("独立视图、标签页、面板或记录区", app.SAME_REPOSITORY_PROMPT_GUIDANCE)
+
+    def test_same_repository_overlap_blocks_isolated_auxiliary_workspace_locally(self):
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "braille-plaque-line-preflight",
+            "same_repository_history": [
+                {
+                    "reference_id": "13360",
+                    "remote_submission_id": "13360",
+                    "task_type": "Feature 迭代",
+                    "prompt": (
+                        "在现有单稿预检页旁加入独立的双稿核对模式，页面复用固定编码器。"
+                        "任一稿非法时停止比对，原有单稿输入和预览保持原样。"
+                    ),
+                }
+            ],
+        }
+        candidate = self.candidate()
+        candidate["prompt"] = (
+            "在现有页面加入独立的六键抄录工作区，页面复用 CellView 展示点位。"
+            "抄录稿不读取或改写单稿预检数据，离开工作区即丢弃。"
+        )
+
+        with mock.patch.object(app, "run_codex_structured") as codex:
+            result = app.run_codex_same_repository_overlap_validation(
+                context, candidate, "Feature 迭代"
+            )
+
+        codex.assert_not_called()
+        self.assertEqual(result["overlap_level"], "medium")
+        self.assertEqual(result["closest_history_reference"], "13360")
+        self.assertTrue(result["same_operation_archetype"])
+        self.assertIn("独立辅助工作区", result["reason"])
+        self.assertIn("同一辅助工作区原型", app.SAME_REPOSITORY_PROMPT_GUIDANCE)
+
+    def test_concept_overlap_stops_before_full_prompt_generation(self):
+        candidate = self.candidate()
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "evacuation-band-gate-attribution",
+            "same_repository_history": [
+                {
+                    "remote_submission_id": "12694",
+                    "prompt": "既有疏散名册持久化与查询题面",
+                }
+            ],
+        }
+        source = {
+            "phase": "complete",
+            "container_cleaned": 1,
+            "repo_url": "https://example.invalid/demo",
+            "first_prompt_id": "prompt-1",
+        }
+        overlap = {
+            "overlap_level": "medium",
+            "closest_history_reference": "12694",
+            "same_business_object": False,
+            "same_operation_archetype": True,
+            "same_validation_family": False,
+            "reason": "都是持久化记录并提供创建和查询入口",
+        }
+        with mock.patch.object(app, "run_row", return_value=source), mock.patch.object(
+            app, "iteration_project_context", return_value=context
+        ), mock.patch.object(
+            app, "run_codex_iteration_concept", return_value=self.concept()
+        ), mock.patch.object(
+            app, "run_codex_iteration_generation", return_value=candidate
+        ) as generate, mock.patch.object(
+            app,
+            "run_codex_same_repository_overlap_validation",
+            return_value=overlap,
+        ) as overlap_review, mock.patch.object(
+            app,
+            "run_codex_iteration_validation",
+            return_value=self.review_result(),
+        ) as full_review:
+            with self.assertRaises(app.SameRepositoryOverlapError):
+                app.generate_iteration_prompt("source111111")
+
+        generate.assert_not_called()
+        overlap_review.assert_called_once()
+        full_review.assert_not_called()
+
+    def test_high_repository_overlap_switches_source_without_second_candidate(self):
+        candidate = self.candidate()
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "demo",
+            "same_repository_history": [{"reference_id": "14487", "prompt": "历史题面"}],
+        }
+        source = {
+            "phase": "complete",
+            "container_cleaned": 1,
+            "repo_url": "https://example.invalid/demo",
+            "first_prompt_id": "prompt-1",
+        }
+        overlap = {
+            "overlap_level": "high",
+            "closest_history_reference": "14487",
+            "same_business_object": True,
+            "same_operation_archetype": True,
+            "same_validation_family": True,
+            "reason": "同一标签解析与字段校验链路",
+        }
+        with mock.patch.object(app, "run_row", return_value=source), mock.patch.object(
+            app, "iteration_project_context", return_value=context
+        ), mock.patch.object(
+            app, "run_codex_iteration_concept", return_value=self.concept()
+        ), mock.patch.object(
+            app, "run_codex_iteration_generation", return_value=candidate
+        ) as generate, mock.patch.object(
+            app, "run_codex_same_repository_overlap_validation", return_value=overlap
+        ), mock.patch.object(app, "run_codex_iteration_validation") as full_review:
+            with self.assertRaises(app.SameRepositoryOverlapError):
+                app.generate_iteration_candidate("source111111")
+
+        generate.assert_not_called()
+        full_review.assert_not_called()
+
+    def test_capacity_error_does_not_consume_second_candidate_attempt(self):
+        context = {"repo_path": "/tmp/existing-project", "repo_name": "demo"}
+        source = {
+            "phase": "complete",
+            "container_cleaned": 1,
+            "repo_url": "https://example.invalid/demo",
+            "first_prompt_id": "prompt-1",
+        }
+        with mock.patch.object(app, "run_row", return_value=source), mock.patch.object(
+            app, "iteration_project_context", return_value=context
+        ), mock.patch.object(
+            app,
+            "run_codex_iteration_generation",
+            side_effect=app.UpstreamCapacityError("上游模型容量不足，稍后重试"),
+        ) as generate:
+            with self.assertRaises(app.UpstreamCapacityError):
+                app.generate_iteration_candidate("source111111")
+
+        self.assertEqual(generate.call_count, 1)
 
     def test_new_module_review_rejects_combined_complex_mechanisms(self):
         context = {"repo_path": "/tmp/existing-project", "repo_name": "demo"}
@@ -5909,7 +7580,7 @@ class IterationGenerationTests(unittest.TestCase):
 
         generate.assert_called_once()
 
-    def test_iteration_generation_ignores_reviewed_difficulty(self):
+    def test_iteration_generation_uses_reviewed_difficulty_gate(self):
         context = {"repo_path": "/tmp/existing-project", "repo_name": "demo"}
         source = {
             "phase": "complete",
@@ -5924,7 +7595,7 @@ class IterationGenerationTests(unittest.TestCase):
         ) as generate, mock.patch.object(
             app,
             "run_codex_iteration_validation",
-            return_value={**self.review_result(), "difficulty": "困难"},
+            return_value=self.review_result(),
         ) as review:
             prompt = app.generate_iteration_prompt("source111111")
 
@@ -5950,6 +7621,27 @@ class IterationGenerationTests(unittest.TestCase):
             return_value=self.review_result(),
         ):
             prompt = app.generate_iteration_prompt("stopped11111")
+
+        self.assertEqual(prompt, self.candidate()["prompt"])
+
+    def test_iteration_generation_accepts_score_capped_completed_baseline(self):
+        context = {"repo_path": "/tmp/existing-project", "repo_name": "demo"}
+        source = {
+            "phase": "score_capped",
+            "container_cleaned": 1,
+            "repo_url": "https://example.invalid/demo",
+            "first_prompt_id": "prompt-1",
+        }
+        with mock.patch.object(app, "run_row", return_value=source), mock.patch.object(
+            app, "iteration_project_context", return_value=context
+        ), mock.patch.object(
+            app, "run_codex_iteration_generation", return_value=self.candidate()
+        ), mock.patch.object(
+            app,
+            "run_codex_iteration_validation",
+            return_value=self.review_result(),
+        ):
+            prompt = app.generate_iteration_prompt("capped111111")
 
         self.assertEqual(prompt, self.candidate()["prompt"])
 
@@ -5992,6 +7684,12 @@ class IterationGenerationTests(unittest.TestCase):
             "repo_path": "/tmp/existing-project",
             "repo_name": "sample-handoff-ledger",
             "iteration_history": [],
+            "same_repository_history": [
+                {
+                    "remote_submission_id": "12312",
+                    "prompt": "同仓库已提交的颜色通道舍入问题",
+                }
+            ],
         }
         with mock.patch.object(
             app, "run_codex_structured", return_value=candidate
@@ -6015,6 +7713,9 @@ class IterationGenerationTests(unittest.TestCase):
         self.assertNotIn("请修复", prompt)
         self.assertEqual(len(result["confirmed_bugs"]), 4)
         self.assertIn("程序只把 scope_summary", codex.call_args.args[0])
+        self.assertIn(app.SAME_REPOSITORY_PROMPT_GUIDANCE, codex.call_args.args[0])
+        self.assertIn("同仓库已提交的颜色通道舍入问题", codex.call_args.args[0])
+        self.assertIn("不按数量补齐或删减", codex.call_args.args[0])
         self.assertEqual(
             codex.call_args.args[4],
             app.BUGFIX_GENERATION_ATTEMPT_TIMEOUT_SECONDS,
@@ -6022,6 +7723,8 @@ class IterationGenerationTests(unittest.TestCase):
         schema = codex.call_args.args[1]
         self.assertEqual(schema["properties"]["task_type"]["enum"], ["Bug 修复"])
         self.assertIn("scope_summary", schema["required"])
+        self.assertEqual(schema["properties"]["confirmed_bugs"]["minItems"], 1)
+        self.assertNotIn("maxItems", schema["properties"]["confirmed_bugs"])
         bug_schema = schema["properties"]["confirmed_bugs"]["items"]["properties"]
         self.assertEqual(bug_schema["reproduction"]["minLength"], 12)
         self.assertEqual(bug_schema["reproduction"]["maxLength"], 22)
@@ -6032,7 +7735,17 @@ class IterationGenerationTests(unittest.TestCase):
 
     def test_first_bugfix_prompt_uses_only_scope_and_customer_summaries(self):
         candidate = self.bugfix_candidate()
-        candidate["confirmed_bugs"] = candidate["confirmed_bugs"][:3]
+        candidate["confirmed_bugs"].append(
+            {
+                "title": "拒收后仍可确认",
+                "reproduction": "发起人拒收后接收人提交原接收码",
+                "actual": "系统仍然完成接收",
+                "expected": "提示交接已拒收并保持原位置",
+                "evidence": "拒收后接口仍返回成功且位置发生变化",
+                "estimated_fix_scope": "小",
+                "customer_summary": "交接被拒收后原接收码仍可确认，应该保持原位置并提示已拒收",
+            }
+        )
 
         result = app.normalize_generated_bugfix_candidate(candidate)
 
@@ -6098,6 +7811,13 @@ class IterationGenerationTests(unittest.TestCase):
             "approved": True,
             "reasons": [],
             "task_type": "Bug 修复",
+            "difficulty_review": {
+                "level": "困难",
+                "hard_drivers": ["并发确认与状态一致性"],
+                "human_work_reasons": ["需要跨服务和页面验证原子裁决"],
+                "inflated_label_risk": False,
+                "one_hour_feasible": True,
+            },
             "bug_review": {
                 "verified_bug_count": 4,
                 "unverified_bugs": [],
@@ -6109,11 +7829,55 @@ class IterationGenerationTests(unittest.TestCase):
             },
         }
         self.assertEqual(app.iteration_review_scope_errors(approved, "Bug 修复"), [])
+        approved["bug_review"]["verified_bug_count"] = 6
+        self.assertEqual(app.iteration_review_scope_errors(approved, "Bug 修复"), [])
         approved["bug_review"]["unverified_bugs"] = ["断网重试无法稳定复现"]
         self.assertIn(
             "无法确认问题",
             app.iteration_review_scope_errors(approved, "Bug 修复")[0],
         )
+
+    def test_bugfix_review_compares_cross_session_repository_history(self):
+        approved = {
+            "approved": True,
+            "reasons": [],
+            "task_type": "Bug 修复",
+            "difficulty_review": {
+                "level": "困难",
+                "hard_drivers": ["并发确认与状态一致性"],
+                "human_work_reasons": ["需要跨服务和页面验证原子裁决"],
+                "inflated_label_risk": False,
+                "one_hour_feasible": True,
+            },
+            "bug_review": {
+                "verified_bug_count": 4,
+                "unverified_bugs": [],
+                "overlapping_sequences": [],
+                "solution_leaks": [],
+                "style_issues": [],
+                "scope_too_large": False,
+                "single_focus": True,
+            },
+        }
+        context = {
+            "repo_path": "/tmp/existing-project",
+            "repo_name": "demo",
+            "same_repository_history": [
+                {
+                    "remote_submission_id": "12312",
+                    "prompt": "黑色展签与深灰墙混色时的通道舍入问题",
+                }
+            ],
+        }
+        with mock.patch.object(
+            app, "run_codex_structured", return_value=approved
+        ) as codex:
+            app.run_codex_bugfix_validation(context, self.bugfix_candidate())
+
+        review_prompt = codex.call_args.args[0]
+        self.assertIn(app.SAME_REPOSITORY_PROMPT_GUIDANCE, review_prompt)
+        self.assertIn("黑色展签与深灰墙混色时的通道舍入问题", review_prompt)
+        self.assertIn("不同边界而放行", review_prompt)
 
     def test_bugfix_candidate_keeps_independent_review_and_source_commit(self):
         candidate = self.bugfix_candidate()
@@ -6121,6 +7885,13 @@ class IterationGenerationTests(unittest.TestCase):
             "approved": True,
             "reasons": [],
             "task_type": "Bug 修复",
+            "difficulty_review": {
+                "level": "困难",
+                "hard_drivers": ["并发确认与状态一致性"],
+                "human_work_reasons": ["需要跨服务和页面验证原子裁决"],
+                "inflated_label_risk": False,
+                "one_hour_feasible": True,
+            },
             "bug_review": {
                 "verified_bug_count": 4,
                 "unverified_bugs": [],
@@ -6512,6 +8283,36 @@ class IterationGenerationTests(unittest.TestCase):
 
             record_skip.assert_not_called()
             record_failure.assert_called_once()
+        finally:
+            with app.ITERATION_JOB_LOCK:
+                app.ITERATION_JOBS.pop("source111111", None)
+
+    def test_auto_refill_capacity_error_releases_slot_without_failure_count(self):
+        with app.ITERATION_JOB_LOCK:
+            app.ITERATION_JOBS["source111111"] = {"status": "generating"}
+        try:
+            with mock.patch.object(
+                app,
+                "generate_and_start_iteration",
+                side_effect=app.UpstreamCapacityError(
+                    "上游模型容量不足，稍后重试"
+                ),
+            ), mock.patch.object(
+                app, "record_auto_refill_capacity_backoff", return_value=60
+            ) as backoff, mock.patch.object(
+                app, "record_auto_refill_failure"
+            ) as record_failure, mock.patch.object(app, "add_event"):
+                app.automatic_iteration_worker(
+                    "source111111", "Bug 修复", False, True
+                )
+
+            with app.ITERATION_JOB_LOCK:
+                job = dict(app.ITERATION_JOBS["source111111"])
+            self.assertEqual(job["status"], "failed")
+            self.assertIn("释放槽位", job["stage"])
+            self.assertGreater(job["cooldown_until_epoch"], int(time.time()))
+            backoff.assert_called_once()
+            record_failure.assert_not_called()
         finally:
             with app.ITERATION_JOB_LOCK:
                 app.ITERATION_JOBS.pop("source111111", None)
@@ -7497,6 +9298,130 @@ B-5 公共长片段（套模板）
         self.assertEqual(missing_result["remote_missing"], 1)
         self.assertEqual(missing["state"], "remote_missing")
 
+    def test_remote_qc_notebook_only_appends_remote_rejections_and_keeps_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                self.insert_completed_turn(root)
+                rejected = {
+                    "id": 568,
+                    "status": "PENDING_FIX",
+                    "session_id": "session-export",
+                    "turn_id": "prompt-export",
+                    "round_no": 1,
+                    "qc_summary": "交付完整性缺少具体位置与实际后果。",
+                    "submitted_at": "2026-09-10 12:00:00 +0800",
+                    "updated_at": "2026-09-10 12:01:00 +0800",
+                }
+                app.sync_solo_qa_submissions({"items": [rejected], "complete": False})
+                app.sync_solo_qa_submissions({"items": [rejected], "complete": False})
+                first_page = app.remote_qc_notebook_page({})
+
+                discarded = dict(rejected)
+                discarded.update({
+                    "status": "DISCARDED",
+                    "qc_summary": "规则 C 命中同仓库题目雷同，该条数据作废。",
+                    "updated_at": "2026-09-10 12:05:00 +0800",
+                })
+                app.sync_solo_qa_submissions({"items": [discarded], "complete": False})
+                app.record_solo_qa_state({
+                    "turn_key": "abc123abc123:1",
+                    "state": "failed",
+                    "error": "本地网络失败",
+                })
+                full_page = app.remote_qc_notebook_page({})
+
+        self.assertEqual(first_page["total"], 1)
+        self.assertEqual(first_page["items"][0]["remote_status"], "PENDING_FIX")
+        self.assertEqual(first_page["items"][0]["remote_submission_id"], "568")
+        self.assertEqual(full_page["total"], 2)
+        self.assertEqual(
+            {item["remote_status"] for item in full_page["items"]},
+            {"PENDING_FIX", "DISCARDED"},
+        )
+        self.assertTrue(all(item["source"] == "remote_sync" for item in full_page["items"]))
+
+    def test_remote_qc_notebook_keeps_unmatched_remote_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                result = app.sync_solo_qa_submissions({
+                    "items": [{
+                        "id": 591,
+                        "status": "DISCARDED",
+                        "session_id": "remote-session-only",
+                        "turn_id": "remote-prompt-only",
+                        "round_no": 1,
+                        "qc_summary": "远端判定题目与历史数据雷同。",
+                    }],
+                    "complete": False,
+                })
+                page = app.remote_qc_notebook_page({})
+
+        self.assertEqual(result["unmatched"], 1)
+        self.assertEqual(page["total"], 1)
+        self.assertIsNone(page["items"][0]["run_id"])
+        self.assertEqual(page["items"][0]["session_id"], "remote-session-only")
+
+    def test_local_task_failure_library_deduplicates_content_and_excludes_capacity(self):
+        reason = (
+            "候选复核与一次定向改写后仍不合规：与 #13360 实质重复，"
+            "两者都是独立辅助工作区。"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                with app.db_connection() as database:
+                    first = app.record_local_task_failure_entry(
+                        database,
+                        run_id="failure00001",
+                        project_number="0132",
+                        repo_name="braille-plaque-line-preflight",
+                        task_type="0-1 代码生成",
+                        failure_stage="0-1 题面预检",
+                        reason=reason,
+                        source="task_generation",
+                    )
+                    duplicate = app.record_local_task_failure_entry(
+                        database,
+                        run_id="failure00001",
+                        project_number="0132",
+                        repo_name="braille-plaque-line-preflight",
+                        task_type="0-1 代码生成",
+                        failure_stage="0-1 题面预检",
+                        reason=reason,
+                        source="task_generation",
+                    )
+                    capacity = app.record_local_task_failure_entry(
+                        database,
+                        run_id="failure00002",
+                        project_number="0133",
+                        repo_name="other-project",
+                        task_type="0-1 代码生成",
+                        failure_stage="0-1 题面预检",
+                        reason="Selected model is at capacity. Please try a different model.",
+                        source="task_generation",
+                    )
+                page = app.local_task_failure_notebook_page(
+                    {"type": ["semantic_overlap"]}
+                )
+
+        self.assertTrue(first)
+        self.assertFalse(duplicate)
+        self.assertFalse(capacity)
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["items"][0]["matched_reference"], "#13360")
+        self.assertEqual(page["items"][0]["failure_type"], "semantic_overlap")
+
     def test_solo_qa_readiness_rejects_simple_first_round(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -7517,6 +9442,78 @@ B-5 公共长片段（套模板）
 
         self.assertFalse(ready)
         self.assertIn("SOLO-QA 首轮不能提交简单难度", issues)
+
+    def test_export_readiness_rejects_medium_difficulty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                self.insert_completed_turn(root)
+                evaluation = sample_evaluation()
+                evaluation["task_difficulty"] = "中等"
+                app.update_turn(
+                    "abc123abc123",
+                    1,
+                    review_result=json.dumps({"evaluation": evaluation}, ensure_ascii=False),
+                )
+                row = app.completed_turn_rows()[0]
+                ready, issues = app.export_readiness(row)
+
+        self.assertFalse(ready)
+        self.assertIn("任务实际难度低于困难，不能导出或提交", issues)
+
+    def test_export_readiness_rejects_automatic_total_over_21(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                self.insert_completed_turn(root)
+                app.write_settings({"collection_score_started_at": "2000-01-01 00:00:00"})
+                manual = {
+                    key: {"score": 3, "description": "第 1 轮按轨迹重新核对了这一项。"}
+                    for key in app.EVALUATION_DIMENSION_KEYS
+                }
+                with app.db_connection() as database:
+                    database.execute(
+                        """UPDATE run_turns SET manual_evaluation = ?
+                            WHERE run_id = ? AND turn_number = 1""",
+                        (json.dumps(manual, ensure_ascii=False), "abc123abc123"),
+                    )
+                row = app.completed_turn_rows()[0]
+                ready, issues = app.export_readiness(row)
+
+        self.assertFalse(ready)
+        self.assertTrue(any("自动五维总分为 25" in issue for issue in issues))
+        self.assertTrue(any("不能通过人工改分绕过" in issue for issue in issues))
+
+    def test_old_medium_task_is_grandfathered_for_export_and_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                self.insert_completed_turn(root)
+                evaluation = sample_evaluation()
+                evaluation["task_difficulty"] = "中等"
+                app.update_turn(
+                    "abc123abc123",
+                    1,
+                    review_result=json.dumps({"evaluation": evaluation}, ensure_ascii=False),
+                )
+                app.write_settings({"task_mix_started_at": "2999-01-01 00:00:00"})
+                row = app.completed_turn_rows()[0]
+                export_ready, export_issues = app.export_readiness(row)
+                solo_ready, solo_issues = app.solo_qa_readiness(
+                    row, export_ready, export_issues
+                )
+
+        self.assertTrue(export_ready, export_issues)
+        self.assertTrue(solo_ready, solo_issues)
 
     def test_delete_run_is_recoverable_and_preserves_project_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -7990,6 +9987,44 @@ class DatabaseTests(unittest.TestCase):
                 self.assertEqual(serialized["stage_timings"]["first"]["status"], "current")
                 self.assertEqual(serialized["stage_timings"]["first"]["elapsed_seconds"], 420)
                 self.assertEqual(serialized["stage_timings"]["review"]["status"], "pending")
+
+    def test_stage_elapsed_seconds_includes_persisted_and_active_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(app, "DB_PATH", root / "test.db"), mock.patch.object(
+                app, "DATA_DIR", root
+            ):
+                app.initialize_database()
+                timestamp = "2026-09-09 10:00:00 +0800"
+                with app.db_connection() as database:
+                    database.execute(
+                        """INSERT INTO runs(
+                          id, repo_name, repo_path, phase, first_prompt,
+                          verification_commands, created_at, updated_at
+                        ) VALUES (?, ?, ?, 'first_running', ?, '[]', ?, ?)""",
+                        (
+                            "elapsed11111",
+                            "elapsed-demo",
+                            "/tmp/elapsed-demo",
+                            "需求",
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                    database.execute(
+                        """INSERT INTO run_stage_timings(
+                          run_id, stage, elapsed_seconds, started_at
+                        ) VALUES (?, 'first', 120, ?)""",
+                        ("elapsed11111", timestamp),
+                    )
+
+                elapsed = app.stage_elapsed_seconds(
+                    "elapsed11111",
+                    "first",
+                    "2026-09-09 10:58:00 +0800",
+                )
+
+        self.assertEqual(elapsed, 3600)
 
     def test_numbered_project_paths_include_disk_and_reserved_runs(self):
         with tempfile.TemporaryDirectory() as directory:

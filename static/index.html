@@ -19,6 +19,9 @@
             </div>
           </div>
           <div class="header-tools">
+            <div class="model-chip parallel-chip version-chip" title="当前控制台版本">
+              <span></span><b id="console-version">版本 20260916.20</b>
+            </div>
             <div class="model-chip parallel-chip"><span></span><b id="parallel-status">并行 0 / 4</b></div>
             <form class="model-switcher" id="model-form">
               <label for="global-model">全局模型</label>
@@ -66,7 +69,7 @@
               <span class="auto-refill-indicator" aria-hidden="true"></span>
               <div>
                 <strong>自动补题</strong>
-                <small id="auto-refill-detail">并行不足 4 时优先续作；每链最多 6 轮，默认按 Feature、Bug 修复和完整模块混合安排。</small>
+                <small id="auto-refill-detail">按 0-1、Feature、Bug 修复的当前数量补题；第一次 Feature 优先完整模块，预检不通过才改走平滑迭代。</small>
                 <small class="auto-refill-deadline hidden" id="auto-refill-deadline"></small>
               </div>
             </div>
@@ -107,6 +110,8 @@
           <button class="module-tab active" id="module-tab-runs" type="button" role="tab" aria-selected="true" aria-controls="records-view">运行记录</button>
           <button class="module-tab" id="open-export-page" type="button" role="tab" aria-selected="false" aria-controls="export-view">导出轮次</button>
           <button class="module-tab" id="open-analytics-page" type="button" role="tab" aria-selected="false" aria-controls="analytics-view">数据分析</button>
+          <button class="module-tab" id="open-qc-notebook-page" type="button" role="tab" aria-selected="false" aria-controls="qc-notebook-view">远端错题本</button>
+          <button class="module-tab" id="open-task-failure-page" type="button" role="tab" aria-selected="false" aria-controls="task-failure-view">本地出题失败库</button>
         </nav>
 
         <div id="notice" class="notice hidden" role="status"></div>
@@ -154,6 +159,7 @@
                 <option value="">全部状态</option>
                 <option value="active">进行中</option>
                 <option value="complete">已完成</option>
+                <option value="score_capped">高分不收录</option>
                 <option value="attention">已中断或失败</option>
               </select>
             </label>
@@ -382,6 +388,83 @@
           </div>
         </section>
 
+        <section id="qc-notebook-view" class="view qc-notebook-view hidden">
+          <div class="qc-notebook-card">
+            <div class="qc-notebook-heading">
+              <div>
+                <span>REMOTE QC NOTEBOOK</span>
+                <h2>远端错题本</h2>
+                <p>只追加保存 SOLO-QA 返回的待返修和已废弃记录；本地检查失败不会进入这里。</p>
+              </div>
+              <b id="qc-notebook-count">0 条远端记录</b>
+            </div>
+            <form class="records-filters qc-notebook-filters" id="qc-notebook-filters">
+              <label>
+                <span>编号或关键词</span>
+                <input id="qc-notebook-query" type="search" autocomplete="off" placeholder="远端编号、项目、SessionID 或打回原因" />
+              </label>
+              <label>
+                <span>远端结论</span>
+                <select id="qc-notebook-status">
+                  <option value="">全部结论</option>
+                  <option value="PENDING_FIX">待返修</option>
+                  <option value="DISCARDED">已废弃</option>
+                </select>
+              </label>
+              <button class="filter-reset" id="reset-qc-notebook-filters" type="button">清除筛选</button>
+            </form>
+            <nav class="table-pagination table-pagination-top" data-table-pagination="notebook" aria-label="错题本上方分页"></nav>
+            <div class="records-table-wrap">
+              <table class="qc-notebook-table">
+                <thead><tr><th>远端结论</th><th>编号 / 项目</th><th>轮次定位</th><th>打回或废弃原因</th><th>收录时间</th></tr></thead>
+                <tbody id="qc-notebook-list"><tr><td colspan="5" class="table-empty">尚未同步远端错题</td></tr></tbody>
+              </table>
+            </div>
+            <nav class="table-pagination table-pagination-bottom" data-table-pagination="notebook" aria-label="错题本下方分页"></nav>
+          </div>
+        </section>
+
+        <section id="task-failure-view" class="view qc-notebook-view hidden">
+          <div class="qc-notebook-card">
+            <div class="qc-notebook-heading">
+              <div>
+                <span>LOCAL PROMPT FAILURE LIBRARY</span>
+                <h2>本地出题失败库</h2>
+                <p>记录开发开始前被内容校验拦截的题面；上游容量、网络、权限和超时不会进入这里。</p>
+              </div>
+              <b id="task-failure-count">0 条内容失败</b>
+            </div>
+            <form class="records-filters qc-notebook-filters" id="task-failure-filters">
+              <label>
+                <span>编号或关键词</span>
+                <input id="task-failure-query" type="search" autocomplete="off" placeholder="项目编号、仓库、RunID、历史题目或失败原因" />
+              </label>
+              <label>
+                <span>失败类型</span>
+                <select id="task-failure-type">
+                  <option value="">全部类型</option>
+                  <option value="score_cap">五维总分超限</option>
+                  <option value="semantic_overlap">语义或规则 C 雷同</option>
+                  <option value="difficulty">难度不足</option>
+                  <option value="scope">范围超标</option>
+                  <option value="undefined_contract">规则未定义</option>
+                  <option value="prompt_quality">题面表达</option>
+                  <option value="content_rejection">其他内容校验</option>
+                </select>
+              </label>
+              <button class="filter-reset" id="reset-task-failure-filters" type="button">清除筛选</button>
+            </form>
+            <nav class="table-pagination table-pagination-top" data-table-pagination="taskFailures" aria-label="本地出题失败库上方分页"></nav>
+            <div class="records-table-wrap">
+              <table class="qc-notebook-table">
+                <thead><tr><th>失败类型</th><th>编号 / 项目</th><th>任务与阶段</th><th>失败原因</th><th>收录时间</th></tr></thead>
+                <tbody id="task-failure-list"><tr><td colspan="5" class="table-empty">尚无本地出题失败记录</td></tr></tbody>
+              </table>
+            </div>
+            <nav class="table-pagination table-pagination-bottom" data-table-pagination="taskFailures" aria-label="本地出题失败库下方分页"></nav>
+          </div>
+        </section>
+
         <section id="detail-view" class="view detail-view hidden"></section>
       </main>
     </div>
@@ -411,6 +494,6 @@
         </div>
       </form>
     </dialog>
-    <script src="/app.js?v=72" defer></script>
+    <script src="/app.js?v=90" defer></script>
   </body>
 </html>

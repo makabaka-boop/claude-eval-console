@@ -1,4 +1,4 @@
-const UI_VERSION = "20260914.7";
+const UI_VERSION = "20260916.20";
 const EXPORT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const TABLE_PAGE_SIZE = 20;
 
@@ -46,6 +46,14 @@ const state = {
   analyticsChartType: "bar",
   analyticsBusy: false,
   analyticsLastLoadedAt: 0,
+  qcNotebookItems: [],
+  qcNotebookPage: 1,
+  qcNotebookPagination: { page: 1, pageSize: TABLE_PAGE_SIZE, totalPages: 1, totalItems: 0, allTotal: 0, startItem: 0, endItem: 0 },
+  qcNotebookFilters: { query: "", status: "" },
+  taskFailureItems: [],
+  taskFailurePage: 1,
+  taskFailurePagination: { page: 1, pageSize: TABLE_PAGE_SIZE, totalPages: 1, totalItems: 0, allTotal: 0, startItem: 0, endItem: 0 },
+  taskFailureFilters: { query: "", type: "" },
   soloQaBridgeReady: false,
   soloQaBridgeVersion: "",
   soloQaBusy: false,
@@ -61,6 +69,8 @@ const recordsView = $("#records-view");
 const detailView = $("#detail-view");
 const exportView = $("#export-view");
 const analyticsView = $("#analytics-view");
+const qcNotebookView = $("#qc-notebook-view");
+const taskFailureView = $("#task-failure-view");
 const pageTitle = $("#page-title");
 const pageDescription = $("#page-description");
 const newRunButton = $("#new-run-button");
@@ -89,6 +99,8 @@ const phaseInfo = {
   complete: ["任务已完成", "complete"],
   turn_limit: ["已到 10 轮上限", "warning"],
   manual_review: ["待人工确认", "warning"],
+  score_capped: ["高分不收录", "warning"],
+  discarded: ["已废弃", "warning"],
   interrupted: ["会话已中断", "warning"],
   failed: ["运行失败", "failed"],
   stopped: ["已终止", "failed"],
@@ -189,6 +201,16 @@ async function changeTablePage(scope, requestedPage) {
   if (scope === "exports") {
     state.exportPage = requestedPage;
     await loadCompletedTurns();
+    return;
+  }
+  if (scope === "notebook") {
+    state.qcNotebookPage = requestedPage;
+    await loadRemoteQcNotebook();
+    return;
+  }
+  if (scope === "taskFailures") {
+    state.taskFailurePage = requestedPage;
+    await loadLocalTaskFailures();
   }
 }
 
@@ -267,7 +289,8 @@ function runMatchesStatus(run, status) {
   if (!status) return true;
   if (status === "active") return isRunning(run.phase);
   if (status === "complete") return run.phase === "complete";
-  if (status === "attention") return runNeedsAttention(run) || ["turn_limit", "manual_review", "interrupted", "failed", "stopped"].includes(run.phase);
+  if (status === "score_capped") return run.phase === "score_capped";
+  if (status === "attention") return runNeedsAttention(run) || ["turn_limit", "manual_review", "discarded", "interrupted", "failed", "stopped"].includes(run.phase);
   return true;
 }
 
@@ -296,7 +319,7 @@ function iterationTypeDescription(taskType) {
     return "在当前项目中构建此前不存在、可独立验收的完整纵向模块。";
   }
   if (taskType === "Bug 修复") {
-    return "检查当前项目并整理 3 至 4 个已复现问题，第一轮只写问题表现，不提供解决方法。";
+    return "检查当前项目并整理同一用户流程中已稳定复现的问题，第一轮只写问题表现，不提供解决方法。";
   }
   return "复用现有核心对象，对已有流程、状态机、接口或页面做平滑扩展。";
 }
@@ -315,6 +338,14 @@ function renderHealth() {
   if (!state.health) return;
   const versionMatches = state.health.app_version === UI_VERSION;
   const ready = state.health.ready && versionMatches;
+  const versionLabel = $("#console-version");
+  if (versionLabel) {
+    const backendVersion = state.health.app_version || "后端未连接";
+    versionLabel.textContent = `版本 ${backendVersion}`;
+    versionLabel.parentElement.title = versionMatches
+      ? `前后端版本一致：${backendVersion}`
+      : `前端 ${UI_VERSION} · 后端 ${backendVersion}`;
+  }
   const importBaselineButton = $("#open-import-baseline");
   if (importBaselineButton) {
     const supported = Boolean(state.health.imported_baseline_supported) && versionMatches;
@@ -372,9 +403,12 @@ function renderHealth() {
   }
   const refillDetail = $("#auto-refill-detail");
   if (refillDetail) {
-    refillDetail.textContent = refill.error
+    const mix = refill.task_type_counts || {};
+    const mixStatus = `当前配比 0-1 ${mix["0-1 代码生成"] || 0} / Feature ${mix["Feature 迭代"] || 0} / Bug ${mix["Bug 修复"] || 0}；下一个优先 ${refill.next_balanced_task_type || "最少类型"}`;
+    const baseDetail = refill.error
       ? `${refill.detail}：${refill.error}`
-      : (refill.detail || `并行不足 ${state.health.max_parallel} 时自动补位；每链最多 ${refill.max_iterations_per_root || 6} 轮，并混合安排 Feature、Bug 修复和最多 ${refill.max_new_modules_per_root || 2} 次完整模块。`);
+      : (refill.detail || `并行不足 ${state.health.max_parallel} 时自动补位；三类任务按 10:10:10 补齐。`);
+    refillDetail.textContent = `${baseDetail} · ${mixStatus}`;
     refillDetail.title = refillDetail.textContent;
   }
   const refillDeadline = $("#auto-refill-deadline");
@@ -461,7 +495,7 @@ function renderRunList() {
     const actions = run.background_generation
       ? `<span class="record-actions"><button class="record-open" type="button" data-run-id="${escapeHtml(targetRunId)}">查看来源</button><span class="background-job-readonly">只读</span></span>`
       : `<span class="record-actions"><button class="record-open" type="button" data-run-id="${escapeHtml(targetRunId)}">查看详情</button><button class="record-delete" type="button" data-run-action="delete" data-run-id="${escapeHtml(targetRunId)}" ${isRunning(run.phase) ? 'disabled title="运行中不可删除"' : ""}>删除</button></span>`;
-    const showStatusDetail = run.background_generation || runNeedsAttention(run);
+    const showStatusDetail = run.background_generation || runNeedsAttention(run) || ["score_capped", "discarded"].includes(run.phase);
     const statusContent = `<span class="run-status-stack"><span class="table-phase ${tone}" title="${escapeHtml(run.status_detail || label)}"><i aria-hidden="true"></i>${escapeHtml(label)}</span>${showStatusDetail ? `<small class="background-job-stage${runNeedsAttention(run) ? " attention-detail" : ""}">${escapeHtml(run.status_detail || "正在生成题面")}</small>` : ""}</span>`;
     return `<tr class="run-row${run.background_generation ? " background-generation" : ""} ${state.selectedId === run.id ? "active" : ""}" data-run-id="${escapeHtml(targetRunId)}" tabindex="0">
       <td data-label="编号"><span class="number-badge">${escapeHtml(run.project_number || "—")}</span></td>
@@ -487,7 +521,7 @@ function progressState(run) {
   if (["first_retry_queued", "first_starting", "first_running"].includes(run.phase)) current = 2;
   if (["first_idle", "review_queued", "review_running", "awaiting_second"].includes(run.phase)) current = 3;
   if (["second_queued", "second_starting", "second_running"].includes(run.phase)) current = 4;
-  if (["second_idle", "final_review_queued", "final_review_running", "manual_review"].includes(run.phase)) current = 5;
+  if (["second_idle", "final_review_queued", "final_review_running", "manual_review", "score_capped", "discarded"].includes(run.phase)) current = 5;
   if (["complete", "turn_limit"].includes(run.phase)) current = run.turn_count > 1 ? 6 : 4;
   if (["failed", "stopped", "interrupted"].includes(run.phase)) {
     if (run.second_prompt_id) current = 5;
@@ -801,7 +835,7 @@ function renderDetail() {
   const eventCount = (run.events || []).length;
   const latestEvent = eventCount ? run.events[eventCount - 1] : null;
   const maxTurns = Number(state.health?.max_turns || 10);
-  const canStartIteration = run.phase === "complete" && run.container_cleaned
+  const canStartIteration = ["complete", "score_capped"].includes(run.phase) && run.container_cleaned
     && run.repo_url && (run.first_prompt_id || run.imported_baseline);
   const selectedIterationTaskType = state.iterationTaskTypes[run.id] || "Feature 迭代";
   const iterationJob = state.iterationJobs[run.id] || null;
@@ -1572,6 +1606,8 @@ function setActiveModuleTab(activeModule) {
     runs: $("#module-tab-runs"),
     exports: $("#open-export-page"),
     analytics: $("#open-analytics-page"),
+    notebook: $("#open-qc-notebook-page"),
+    taskFailures: $("#open-task-failure-page"),
   };
   Object.entries(tabs).forEach(([module, tab]) => {
     const active = module === activeModule;
@@ -1739,6 +1775,82 @@ async function loadHourlyAnalytics(dateValue = state.analyticsDate || localDateV
   }
 }
 
+function renderRemoteQcNotebook() {
+  const items = state.qcNotebookItems;
+  $("#qc-notebook-count").textContent = `${state.qcNotebookPagination.allTotal} 条远端记录`;
+  $("#qc-notebook-list").innerHTML = items.length ? items.map((item) => {
+    const discarded = item.remote_status === "DISCARDED";
+    const label = discarded ? "已废弃" : "待返修";
+    const project = [item.project_number, item.repo_name].filter(Boolean).join(" · ") || "未匹配本地任务";
+    const round = item.turn_number || item.round_no;
+    const position = [item.session_id ? `Session ${item.session_id}` : "", round ? `第 ${round} 轮` : ""].filter(Boolean).join(" · ") || "仅保存远端记录";
+    return `<tr>
+      <td data-label="远端结论"><span class="qc-notebook-status ${discarded ? "discarded" : "needs-fix"}">${label}</span></td>
+      <td data-label="编号 / 项目"><b>#${escapeHtml(item.remote_submission_id)}</b><small>${escapeHtml(project)}</small></td>
+      <td data-label="轮次定位"><span>${escapeHtml(position)}</span>${item.prompt_id ? `<small>Prompt ${escapeHtml(item.prompt_id)}</small>` : ""}</td>
+      <td data-label="原因"><details class="qc-notebook-reason"><summary>${escapeHtml(String(item.qc_summary || "").slice(0, 90))}${String(item.qc_summary || "").length > 90 ? "…" : ""}</summary><pre>${escapeHtml(item.qc_summary || "")}</pre></details></td>
+      <td data-label="收录时间">${renderTableTimestamp(item.captured_at, "updated")}</td>
+    </tr>`;
+  }).join("") : '<tr><td colspan="5" class="table-empty">没有符合条件的远端错题记录</td></tr>';
+  renderTablePagination("notebook", state.qcNotebookPagination);
+}
+
+async function loadRemoteQcNotebook() {
+  const query = listQuery({
+    page: state.qcNotebookPage,
+    page_size: TABLE_PAGE_SIZE,
+    query: state.qcNotebookFilters.query,
+    status: state.qcNotebookFilters.status,
+  });
+  const result = await api(`/api/solo-qa/notebook${query}`);
+  state.qcNotebookItems = result.items || [];
+  state.qcNotebookPagination = paginationFromResponse(result);
+  state.qcNotebookPage = state.qcNotebookPagination.page;
+  renderRemoteQcNotebook();
+}
+
+const localTaskFailureLabels = {
+  score_cap: "五维总分超限",
+  semantic_overlap: "语义或规则 C 雷同",
+  difficulty: "难度不足",
+  scope: "范围超标",
+  undefined_contract: "规则未定义",
+  prompt_quality: "题面表达",
+  content_rejection: "其他内容校验",
+};
+
+function renderLocalTaskFailures() {
+  const items = state.taskFailureItems;
+  $("#task-failure-count").textContent = `${state.taskFailurePagination.allTotal} 条内容失败`;
+  $("#task-failure-list").innerHTML = items.length ? items.map((item) => {
+    const label = localTaskFailureLabels[item.failure_type] || item.failure_type || "内容校验";
+    const project = [item.project_number, item.repo_name].filter(Boolean).join(" · ") || "未匹配项目";
+    const stage = [item.task_type, item.failure_stage].filter(Boolean).join(" · ") || "题面预检";
+    return `<tr>
+      <td data-label="失败类型"><span class="qc-notebook-status discarded">${escapeHtml(label)}</span>${item.matched_reference ? `<small>命中 ${escapeHtml(item.matched_reference)}</small>` : ""}</td>
+      <td data-label="编号 / 项目"><b>${escapeHtml(project)}</b>${item.run_id ? `<small>Run ${escapeHtml(item.run_id)}</small>` : ""}</td>
+      <td data-label="任务与阶段"><span>${escapeHtml(stage)}</span><small>${escapeHtml(item.source || "")}</small></td>
+      <td data-label="失败原因"><details class="qc-notebook-reason"><summary>${escapeHtml(String(item.reason || "").slice(0, 90))}${String(item.reason || "").length > 90 ? "…" : ""}</summary><pre>${escapeHtml(item.reason || "")}</pre></details></td>
+      <td data-label="收录时间">${renderTableTimestamp(item.captured_at, "updated")}</td>
+    </tr>`;
+  }).join("") : '<tr><td colspan="5" class="table-empty">没有符合条件的本地出题失败记录</td></tr>';
+  renderTablePagination("taskFailures", state.taskFailurePagination);
+}
+
+async function loadLocalTaskFailures() {
+  const query = listQuery({
+    page: state.taskFailurePage,
+    page_size: TABLE_PAGE_SIZE,
+    query: state.taskFailureFilters.query,
+    type: state.taskFailureFilters.type,
+  });
+  const result = await api(`/api/task-failures${query}`);
+  state.taskFailureItems = result.items || [];
+  state.taskFailurePagination = paginationFromResponse(result);
+  state.taskFailurePage = state.taskFailurePagination.page;
+  renderLocalTaskFailures();
+}
+
 function setPageHeader(title, description, showNewButton = true) {
   pageTitle.textContent = title;
   pageDescription.textContent = description;
@@ -1751,6 +1863,8 @@ function showListPage() {
   detailView.classList.add("hidden");
   exportView.classList.add("hidden");
   analyticsView.classList.add("hidden");
+  qcNotebookView.classList.add("hidden");
+  taskFailureView.classList.add("hidden");
   recordsView.classList.remove("hidden");
   setActiveModuleTab("runs");
   setPageHeader("运行记录", "查看任务状态、当前轮次和使用的技术信息。", true);
@@ -1764,6 +1878,8 @@ async function showDetailPage(id) {
   recordsView.classList.add("hidden");
   exportView.classList.add("hidden");
   analyticsView.classList.add("hidden");
+  qcNotebookView.classList.add("hidden");
+  taskFailureView.classList.add("hidden");
   detailView.classList.remove("hidden");
   setActiveModuleTab("runs");
   setPageHeader("任务详情", "查看完整题面、会话标识、逐轮结果和运行轨迹。", true);
@@ -1779,6 +1895,8 @@ async function showExportPage() {
   recordsView.classList.add("hidden");
   detailView.classList.add("hidden");
   analyticsView.classList.add("hidden");
+  qcNotebookView.classList.add("hidden");
+  taskFailureView.classList.add("hidden");
   exportView.classList.remove("hidden");
   setActiveModuleTab("exports");
   setPageHeader("导出与提交", "选择一个或多个已完成轮次，导出 Excel 或提交到 SOLO-QA。", true);
@@ -1794,10 +1912,44 @@ async function showAnalyticsPage() {
   recordsView.classList.add("hidden");
   detailView.classList.add("hidden");
   exportView.classList.add("hidden");
+  qcNotebookView.classList.add("hidden");
+  taskFailureView.classList.add("hidden");
   analyticsView.classList.remove("hidden");
   setActiveModuleTab("analytics");
   setPageHeader("数据分析", "按自然小时查看已完成轮次的产出节奏和任务类型分布。", true);
   await loadHourlyAnalytics(state.analyticsDate || localDateValue());
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function showRemoteQcNotebookPage() {
+  state.selectedId = null;
+  state.detail = null;
+  recordsView.classList.add("hidden");
+  detailView.classList.add("hidden");
+  exportView.classList.add("hidden");
+  analyticsView.classList.add("hidden");
+  taskFailureView.classList.add("hidden");
+  qcNotebookView.classList.remove("hidden");
+  setActiveModuleTab("notebook");
+  setPageHeader("远端错题本", "保存 SOLO-QA 实际返回的打回和废弃原因，返修后仍保留旧记录。", true);
+  $("#qc-notebook-list").innerHTML = '<tr><td colspan="5" class="table-empty">正在读取远端错题…</td></tr>';
+  await loadRemoteQcNotebook();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+async function showLocalTaskFailurePage() {
+  state.selectedId = null;
+  state.detail = null;
+  recordsView.classList.add("hidden");
+  detailView.classList.add("hidden");
+  exportView.classList.add("hidden");
+  analyticsView.classList.add("hidden");
+  qcNotebookView.classList.add("hidden");
+  taskFailureView.classList.remove("hidden");
+  setActiveModuleTab("taskFailures");
+  setPageHeader("本地出题失败库", "保存开发开始前被内容校验拦截的题面原因，不混入上游容量、网络和超时。", true);
+  $("#task-failure-list").innerHTML = '<tr><td colspan="5" class="table-empty">正在读取本地出题失败记录…</td></tr>';
+  await loadLocalTaskFailures();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -1888,6 +2040,14 @@ async function applyRoute() {
   }
   if (hash === "#analytics") {
     await showAnalyticsPage();
+    return;
+  }
+  if (hash === "#qc-notebook") {
+    await showRemoteQcNotebookPage();
+    return;
+  }
+  if (hash === "#task-failures") {
+    await showLocalTaskFailurePage();
     return;
   }
   const detailMatch = hash.match(/^#run\/([a-f0-9]{12})$/);
@@ -2412,6 +2572,8 @@ $("#auto-refill-clear").addEventListener("click", clearAutoRefillSchedule);
 $("#module-tab-runs").addEventListener("click", () => navigateTo("#runs"));
 $("#open-export-page").addEventListener("click", () => navigateTo("#exports"));
 $("#open-analytics-page").addEventListener("click", () => navigateTo("#analytics"));
+$("#open-qc-notebook-page").addEventListener("click", () => navigateTo("#qc-notebook"));
+$("#open-task-failure-page").addEventListener("click", () => navigateTo("#task-failures"));
 $("#export-back-to-list").addEventListener("click", () => navigateTo("#runs"));
 $("#analytics-date").addEventListener("change", (event) => {
   if (event.target.value) loadHourlyAnalytics(event.target.value);
@@ -2533,6 +2695,38 @@ $("#reset-export-filters").addEventListener("click", () => {
   };
   state.exportPage = 1;
   loadCompletedTurns();
+});
+$("#qc-notebook-query").addEventListener("input", (event) => {
+  state.qcNotebookFilters.query = event.target.value.trim();
+  state.qcNotebookPage = 1;
+  loadRemoteQcNotebook();
+});
+$("#qc-notebook-status").addEventListener("change", (event) => {
+  state.qcNotebookFilters.status = event.target.value;
+  state.qcNotebookPage = 1;
+  loadRemoteQcNotebook();
+});
+$("#reset-qc-notebook-filters").addEventListener("click", () => {
+  $("#qc-notebook-filters").reset();
+  state.qcNotebookFilters = { query: "", status: "" };
+  state.qcNotebookPage = 1;
+  loadRemoteQcNotebook();
+});
+$("#task-failure-query").addEventListener("input", (event) => {
+  state.taskFailureFilters.query = event.target.value.trim();
+  state.taskFailurePage = 1;
+  loadLocalTaskFailures();
+});
+$("#task-failure-type").addEventListener("change", (event) => {
+  state.taskFailureFilters.type = event.target.value;
+  state.taskFailurePage = 1;
+  loadLocalTaskFailures();
+});
+$("#reset-task-failure-filters").addEventListener("click", () => {
+  $("#task-failure-filters").reset();
+  state.taskFailureFilters = { query: "", type: "" };
+  state.taskFailurePage = 1;
+  loadLocalTaskFailures();
 });
 document.querySelectorAll("[data-table-pagination]").forEach((pagination) => {
   pagination.addEventListener("click", (event) => {
