@@ -10,7 +10,8 @@
 <main>
 <section id="task-view">
   <section class="intro"><div><p class="eyebrow">NOVEMBER 2026 · DOMAIN FEEDBACK</p><h1>一条任务，完整记录。</h1><p class="muted">单 Session 执行，保留原始轨迹、产物与运行录屏，再完成结果和过程评价。</p></div><button class="primary" id="new-task">＋ 新建题目</button></section>
-  <section class="rules"><div><span class="small">本期个人领域</span><button id="profile-open" class="profile">尚未选择 →</button></div><div><span class="small">任务执行</span><strong>甲方 auto · 1M</strong></div><div><span class="small">分析与评价</span><strong>gpt-6.1-sol · high</strong></div><div><span class="small">正式提交</span><strong class="amber">等待模板配置</strong></div></section>
+  <section class="rules"><div><span class="small">本期个人领域</span><button id="profile-open" class="profile">尚未选择 →</button></div><div><span class="small">任务执行</span><strong id="execution-state">等待甲方配置</strong></div><div><span class="small">分析与评价</span><strong>gpt-6.1-sol · high</strong></div><div><span class="small">正式提交</span><strong class="amber">等待模板配置</strong></div></section>
+  <div class="notice" id="execution-notice" hidden></div>
   <div class="notice" id="domain-notice">领域可以最后选。通用流程已就绪，实际建题前再固定本期的一个领域。</div>
   <section class="panel task-panel"><div class="panel-head"><div><p class="eyebrow">TASKS</p><h2>专项题目 <span id="total" class="count">0</span></h2></div><div class="filters"><input id="search" placeholder="搜索标题或 Prompt" aria-label="搜索标题或 Prompt"><select id="type-filter" aria-label="按任务类型筛选"><option value="">全部任务类型</option></select><button id="refresh">刷新</button></div></div><div id="tasks" aria-live="polite"><p class="empty">正在读取任务…</p></div><footer class="pager"><span id="page-label">第 1 页</span><div><button id="prev">上一页</button><button id="next">下一页</button></div></footer></section>
   <p class="footnote">同一 Repo 可出多道独立题。中断仅发送“继续”，所有续写归并为一条样本，提交定位始终为首轮。</p>

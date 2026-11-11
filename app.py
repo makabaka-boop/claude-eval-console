@@ -80,7 +80,7 @@ CLAUDE_SETTINGS_PATH = CLAUDE_DIR / "settings.json"
 CLAUDE_CONTEXT_WINDOW = "1m"
 DOCKER_IMAGE = os.environ.get(
     "CLAUDE_EVAL_DOCKER_IMAGE",
-    "adminfather/benzhi-claude-code:20260909-isolated-git",
+    "adminfather/benzhi-claude-code:20261109",
 ).strip()
 DOCKER_API_KEY_ENV = "CLAUDE_EVAL_DOCKER_API_KEY"
 CONTAINER_TRACE_PATH = "/home/node/.claude/projects"
@@ -148,7 +148,7 @@ SOLO_QA_PROJECT_REJECTION_MARKERS = (
     "题材不合格",
 )
 SUBMITTER_NAME = os.environ.get("CLAUDE_EVAL_SUBMITTER", "张鑫宇").strip() or "张鑫宇"
-APP_VERSION = "20261111.1"
+APP_VERSION = "20261111.2"
 FEEDBACK_MODE = os.environ.get("CLAUDE_EVAL_WORKFLOW", "feedback") == "feedback" and os.environ.get("CLAUDE_EVAL_LEGACY_MODE") != "1"
 PAIRWISE_MODE = not FEEDBACK_MODE and os.environ.get("CLAUDE_EVAL_LEGACY_MODE") != "1"
 PAIRWISE_HISTORY_PATH = APP_DIR / "gsb历史题库.md"
@@ -891,6 +891,15 @@ def detect_harness_version() -> str:
     global HARNESS_VERSION_CACHE
     if HARNESS_VERSION_CACHE is not None:
         return HARNESS_VERSION_CACHE
+    if FEEDBACK_MODE:
+        # Inspect package metadata offline, without launching Claude or reading a Key.
+        try:
+            from feedback.environment import inspect_image
+            detected=inspect_image(sys.modules[__name__])['harness_version']
+        except Exception:
+            detected=''
+        HARNESS_VERSION_CACHE=detected
+        return detected
     configured = normalize_harness_version(
         os.environ.get("CLAUDE_EVAL_HARNESS_VERSION", "")
     )
@@ -12017,7 +12026,7 @@ def terminal_asset_paths(run_id: str) -> Dict[str, Path]:
     }
 
 
-def write_terminal_launcher(row: sqlite3.Row, image: Optional[str] = None) -> Dict[str, Path]:
+def write_terminal_launcher(row: sqlite3.Row, image: Optional[str] = None, vendor_credentials: bool = False) -> Dict[str, Path]:
     paths = terminal_asset_paths(str(row["id"]))
     paths["root"].mkdir(parents=True, exist_ok=True)
     run_directory = run_directory_for(row)
@@ -12056,6 +12065,24 @@ printf '%s\n' "$container_exit_code" > "$exit_status"
 printf '\nClaude 容器已停止，请返回评测控制台查看导出结果。\n'
 exit "$container_exit_code"
 """
+    if vendor_credentials:
+        # Dedicated vendor env only. Do not read personal settings or prompt for a Key.
+        start=launcher.index('settings_file=')
+        end=launcher.index('export apikey="$api_key"',start)
+        launcher=launcher[:start]+f'''exit_status={shlex.quote(str(paths['exit_status']))}
+printf '\\n任务容器：%s\\n本机目录：%s\\n容器目录：/workspace\\n\\n' "$container_name" {shlex.quote(str(run_directory))}
+if [[ "${{CLAUDE_EVAL_VENDOR_MODEL:-}}" != "$model" ]]; then
+  printf '甲方执行模型尚未确认或与本任务不一致，未启动容器。\\n'
+  exit 78
+fi
+api_key="${{{DOCKER_API_KEY_ENV}:-}}"
+unset {DOCKER_API_KEY_ENV} ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
+if [[ -z "$api_key" ]]; then
+  printf '缺少甲方专用 Key，未启动容器。\\n'
+  exit 78
+fi
+'''+launcher[end:]
+        launcher=launcher.replace('--name "$container_name" --mount',f'--name "$container_name" --label "feedback.console.run={row["id"]}" --mount')
     paths["launcher"].write_text(launcher, encoding="utf-8")
     paths["launcher"].chmod(0o700)
     screen_log = str(paths["screen_log"]).replace("\\", "\\\\").replace('"', '\\"')
@@ -12077,7 +12104,10 @@ def open_terminal_screen(screen_name: str) -> None:
     run_command(["osascript", "-e", apple_script], timeout=30)
 
 
-def launch_docker_terminal(row: sqlite3.Row, image: Optional[str] = None) -> str:
+def launch_docker_terminal(row: sqlite3.Row, image: Optional[str] = None, vendor_credentials: bool = False) -> str:
+    if vendor_credentials:
+        from feedback.environment import require_execution_config
+        require_execution_config(sys.modules[__name__])
     container_name = str(row["container_name"] or f"claude-eval-{row['id']}")
     screen_name = str(row["screen_name"] or f"claude-eval-{row['id']}")
     if docker_container_running(container_name):
@@ -12091,7 +12121,10 @@ def launch_docker_terminal(row: sqlite3.Row, image: Optional[str] = None) -> str
         raise WorkflowError(f"容器名称已被占用：{container_name}")
     if screen_session_running(screen_name):
         raise WorkflowError(f"终端会话名称已被占用：{screen_name}")
-    paths = write_terminal_launcher(row, image) if image else write_terminal_launcher(row)
+    if vendor_credentials:
+        paths = write_terminal_launcher(row, image=image, vendor_credentials=True)
+    else:
+        paths = write_terminal_launcher(row, image) if image else write_terminal_launcher(row)
     run_command(
         [
             "screen", "-c", str(paths["screenrc"]), "-dmS", screen_name,
@@ -17481,7 +17514,7 @@ def dependency_status() -> Dict[str, Any]:
                 },
                 "codex_version": codex_version,
                 "docker_image": DOCKER_IMAGE,
-                "api_key_source": docker_api_key_source(),
+                "api_key_source": ("甲方专用环境变量" if os.environ.get(DOCKER_API_KEY_ENV) else "未配置甲方专用 Key") if FEEDBACK_MODE else docker_api_key_source(),
                 "review_model": REVIEW_MODEL,
                 "review_reasoning_effort": CODEX_REASONING_EFFORT,
                 "task_generation_model": TASK_GENERATION_MODEL,

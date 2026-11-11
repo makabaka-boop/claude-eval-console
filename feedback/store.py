@@ -12,7 +12,7 @@ from . import policy
 def backup_database(path):
     directory=Path(path).parent/'backups'
     directory.mkdir(parents=True,exist_ok=True)
-    target=directory/'before-feedback-202611-v1.sqlite3'
+    target=directory/'before-feedback-docker-20261109.sqlite3'
     if target.exists():return target
     with tempfile.TemporaryDirectory(dir=directory) as work:
         temporary=Path(work)/'database.sqlite3'
@@ -60,6 +60,8 @@ def initialize(h):
           other_issues TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
           review_confirmed INTEGER NOT NULL DEFAULT 0,
           review_source TEXT NOT NULL DEFAULT '', resume_count INTEGER NOT NULL DEFAULT 0,
+          container_id TEXT NOT NULL DEFAULT '', cleanup_status TEXT NOT NULL DEFAULT 'pending',
+          cleanup_error TEXT NOT NULL DEFAULT '', cleanup_at TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS feedback_runs_task ON feedback_runs(task_id,created_at);
@@ -81,6 +83,11 @@ def initialize(h):
         for name in ('trace_url','recording_url','result_feedback','process_feedback'):
             if name not in columns:
                 db.execute(f"ALTER TABLE feedback_runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+        for name in ('container_id','cleanup_status','cleanup_error','cleanup_at'):
+            if name not in columns:
+                default='pending' if name=='cleanup_status' else ''
+                db.execute(f"ALTER TABLE feedback_runs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
+        db.execute("UPDATE feedback_runs SET cleanup_status='preserved' WHERE status='archived' AND container_id='' AND cleanup_status='pending'")
 
 
 def profile(h):
@@ -197,6 +204,7 @@ RUN_FIELDS = {"status","detail","error","config","prompt_sent","first_session_id
               "analysis_status","analysis","analysis_model","analysis_effort","analysis_source","analysis_error",
               "delivery_score","feedback","other_issues","notes","review_confirmed","review_source","resume_count"}
 RUN_FIELDS.update({'trace_url','recording_url','result_feedback','process_feedback'})
+RUN_FIELDS.update({'container_id','cleanup_status','cleanup_error','cleanup_at'})
 
 
 def update(h, run_id, **fields):

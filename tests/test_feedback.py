@@ -16,9 +16,10 @@ from xml.etree import ElementTree as ET
 import pytest
 
 import app
-from feedback import analysis, export, media, policy, review, store, trace, workflow
+from feedback import analysis, environment, export, lifecycle, media, policy, review, store, trace, workflow
 from pairwise import models as legacy
-from pairwise import environment
+REAL_FINISH=lifecycle.finish
+REAL_CLEANUP=lifecycle.cleanup
 
 
 @pytest.fixture
@@ -30,11 +31,18 @@ def host(tmp_path,monkeypatch):
         monkeypatch.setattr(app,key,value)
     app.initialize_database();store.initialize(app);legacy.initialize(app)
     monkeypatch.setattr(app,'WORKER_SLOT_ACTIVE',0)
+    monkeypatch.setenv(environment.MODEL_ENV,policy.EXECUTION_MODEL)
+    monkeypatch.setenv(app.DOCKER_API_KEY_ENV,'fixture-vendor-key')
+    monkeypatch.setattr(lifecycle,'finish',lambda *_:None)
+    def fixture_cleanup(h,run_id):
+        store.update(h,run_id,cleanup_status='complete')
+        return store.run(h,run_id)
+    monkeypatch.setattr(lifecycle,'cleanup',fixture_cleanup)
     def no_worker(h,run_id,reserved=False):
         if reserved:workflow.release_slot(h)
     monkeypatch.setattr(workflow,'enqueue',no_worker)
     monkeypatch.setattr(environment,'verify_host',lambda *_:None)
-    monkeypatch.setattr(environment,'verify_container',lambda *_:None)
+    monkeypatch.setattr(environment,'verify_container',lambda *_:{'container_id':'f'*64})
     workflow.STOP.clear();workflow.WORKERS.clear()
     return app
 
@@ -52,7 +60,7 @@ def create(h,**changes):
 
 def config():
     return {'model':policy.EXECUTION_MODEL,'context_tokens':1_000_000,'harness':'Claude Code',
-            'harness_version':'2.1.197','operating_system':'macOS','credential':'private-fingerprint'}
+            'harness_version':'2.1.319','operating_system':'macOS','credential':'private-fingerprint'}
 
 
 def user(text,prompt_id,session='session-fixture'):
@@ -275,13 +283,12 @@ def test_git_archive_preserves_intermediate_and_published_tree(archived):
 
 def test_two_interruptions_execution_to_review_and_export(archived,tmp_path,monkeypatch):
     """Real SQLite/Git/JSONL/media/export; synthetic vendor responses only."""
-    from pairwise import environment
     f=archived;h=f['h'];task=create(h,initial_snapshot=f['task']['initial_snapshot'])
     r,_=workflow.start(h,task['id']);rid=r['id'];row=h.run_row(rid);workspace=Path(row['repo_path'])
     source=tmp_path/'two-interruptions';events=[];sent=[];commits=[]
     monkeypatch.setattr(environment,'freeze',lambda _:{**config(),'image':'sha256:fixture'})
     monkeypatch.setattr(environment,'verify_host',lambda *_:None)
-    monkeypatch.setattr(environment,'verify_container',lambda *_:None)
+    monkeypatch.setattr(environment,'verify_container',lambda *_:{'container_id':'f'*64})
     def launch(row,**_):
         path=Path(row['repo_path']);assert not path.exists() or not any(path.iterdir());path.mkdir(parents=True,exist_ok=True)
     monkeypatch.setattr(h,'launch_docker_terminal',launch)
@@ -581,3 +588,180 @@ def test_http_raw_upload_and_range_download(http,host):
     req=urllib.request.Request(http+f"/api/feedback/tasks/{task['id']}/attachments?name=test.txt",data=file,headers={'Content-Type':'application/octet-stream'})
     with urllib.request.urlopen(req) as response:assert response.status==201;task=json.loads(response.read())
     status,body=http_request(http,f"/api/feedback/tasks/{task['id']}/attachments/{task['attachments'][0]['id']}");assert status==200;assert body==file
+
+
+@pytest.mark.parametrize('missing',['key','model','both'])
+def test_vendor_configuration_missing_blocks_before_run_creation(host,monkeypatch,missing):
+    task=create(host)
+    if missing in {'key','both'}:monkeypatch.delenv(host.DOCKER_API_KEY_ENV,raising=False)
+    if missing in {'model','both'}:monkeypatch.delenv(environment.MODEL_ENV,raising=False)
+    monkeypatch.setenv('ANTHROPIC_AUTH_TOKEN','personal-key-must-not-be-used')
+    monkeypatch.setenv('ANTHROPIC_API_KEY','another-personal-key')
+    personal=host.DATA_DIR/'personal-settings.json'
+    personal.write_text(json.dumps({'env':{'ANTHROPIC_AUTH_TOKEN':'personal-settings-key'}}))
+    monkeypatch.setattr(host,'CLAUDE_SETTINGS_PATH',personal)
+    assert not environment.configuration(host)['execution_ready']
+    with pytest.raises(host.WorkflowError,match='等待甲方'):workflow.start(host,task['id'])
+    with pytest.raises(host.WorkflowError):environment.credential_fingerprint(host)
+    with host.db_connection() as db:assert db.execute('SELECT COUNT(*) FROM runs').fetchone()[0]==0
+
+
+def test_missing_vendor_config_does_not_prevent_saving_question(host,monkeypatch):
+    monkeypatch.delenv(environment.MODEL_ENV,raising=False);monkeypatch.delenv(host.DOCKER_API_KEY_ENV,raising=False)
+    assert create(host)['prompt']==payload()['prompt']
+
+
+def test_vendor_launcher_has_no_personal_key_fallback(host,monkeypatch,tmp_path):
+    task=create(host);r,_=workflow.start(host,task['id'])
+    paths=host.write_terminal_launcher(host.run_row(r['id']),image='sha256:'+'a'*64,vendor_credentials=True)
+    script=paths['launcher'].read_text()
+    assert 'settings_file' not in script and 'read -r -s' not in script
+    assert 'personal' not in script and 'fixture-vendor-key' not in script
+    assert '--label "feedback.console.run='+r['id']+'"' in script
+    assert '--rm' not in script;assert '-e apikey' in script
+    subprocess.run(['/bin/zsh','-n',str(paths['launcher'])],check=True)
+    env=host.os.environ.copy();env.pop(host.DOCKER_API_KEY_ENV,None);env['ANTHROPIC_AUTH_TOKEN']='personal-should-not-fallback'
+    blocked=subprocess.run(['/bin/zsh',str(paths['launcher'])],env=env,capture_output=True,text=True,timeout=10)
+    assert blocked.returncode==78 and '缺少甲方专用 Key' in blocked.stdout
+    env.pop(environment.MODEL_ENV,None)
+    blocked=subprocess.run(['/bin/zsh',str(paths['launcher'])],env=env,capture_output=True,text=True,timeout=10)
+    assert blocked.returncode==78 and '模型尚未确认' in blocked.stdout
+
+
+def metadata():
+    return {'version':'2.1.319 (Claude Code)','model':policy.EXECUTION_MODEL,'context_tokens':1_000_000,
+            'env':{'ANTHROPIC_BASE_URL':'https://llm.jzxhnh.com'},'files':{},'platform':'linux','arch':'arm64'}
+
+
+def test_image_inspection_is_offline_and_without_vendor_credentials(host,monkeypatch):
+    calls=[]
+    def command(argv,**kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv,0,stdout='sha256:'+'a'*64 if argv[:3]==['docker','image','inspect'] else json.dumps(metadata()),stderr='')
+    monkeypatch.setattr(host,'run_command',command)
+    monkeypatch.delenv(host.DOCKER_API_KEY_ENV,raising=False);monkeypatch.delenv(environment.MODEL_ENV,raising=False)
+    result=environment.inspect_image(host)
+    assert result['harness_version']=='2.1.319';assert result['context_tokens']==1_000_000
+    assert '--network' in calls[1] and calls[1][calls[1].index('--network')+1]=='none'
+    assert calls[1][calls[1].index('--entrypoint')+1]=='node'
+    assert not any(arg in {'apikey','fixture-vendor-key'} for args in calls for arg in args)
+    with pytest.raises(host.WorkflowError):environment.freeze(host)
+    assert len(calls)==2
+
+
+@pytest.mark.parametrize('change',[{'version':'2.1.197 (Claude Code)'},{'model':'different/model'},
+    {'context_tokens':200_000},{'env':{'ANTHROPIC_BASE_URL':'https://wrong.invalid'}}])
+def test_wrong_image_runtime_is_rejected(host,change):
+    with pytest.raises(host.WorkflowError):environment.normalize(host,json.dumps({**metadata(),**change}))
+
+
+def test_vendor_http_configuration_is_redacted_and_start_blocked(http,host,monkeypatch):
+    task=create(host);monkeypatch.delenv(environment.MODEL_ENV,raising=False);monkeypatch.delenv(host.DOCKER_API_KEY_ENV,raising=False)
+    status,body=http_request(http,'/api/feedback/config');config=json.loads(body)
+    assert status==200 and not config['execution_ready']
+    assert not config['vendor_key_configured'] and config['vendor_model']==''
+    status,body=http_request(http,f"/api/feedback/tasks/{task['id']}/start",{})
+    assert status==400 and '等待甲方' in body.decode()
+    monkeypatch.setenv(environment.MODEL_ENV,policy.EXECUTION_MODEL);monkeypatch.setenv(host.DOCKER_API_KEY_ENV,'private-vendor-value')
+    status,body=http_request(http,'/api/feedback/config')
+    assert json.loads(body)['execution_ready'];assert 'private-vendor-value' not in body.decode()
+
+
+def simulated_container(fixture,monkeypatch,running=False):
+    h=fixture['h'];rid=fixture['run']['id'];state={'id':'f'*64,'running':running,'run_id':rid,'exists':True,'calls':[],'exit_after':2}
+    store.update(h,rid,container_id=state['id'],cleanup_status='pending')
+    original=h.run_command
+    def command(argv,**kwargs):
+        if argv[0] not in {'docker','screen'}:return original(argv,**kwargs)
+        state['calls'].append(argv)
+        if argv[:2]==['docker','inspect']:
+            if not state['exists']:return subprocess.CompletedProcess(argv,1,stdout='',stderr='Error: No such object')
+            return subprocess.CompletedProcess(argv,0,stdout=json.dumps({k:state[k] for k in ('id','running','run_id')}),stderr='')
+        if argv[:2]==['docker','rm']:
+            if state.get('remove_error'):raise h.WorkflowError('Docker removal failed')
+            state['exists']=False
+        if argv[0]=='screen':
+            exits=sum(1 for item in state['calls'] if item[0]=='screen')
+            if exits>=state['exit_after']:state['running']=False
+        return subprocess.CompletedProcess(argv,0,stdout='',stderr='')
+    monkeypatch.setattr(h,'run_command',command)
+    return state
+
+
+def test_completed_session_exits_with_control_d_only(archived,monkeypatch):
+    state=simulated_container(archived,monkeypatch,running=True);h=archived['h'];rid=archived['run']['id']
+    store.update(h,rid,status='archiving');REAL_FINISH(h,rid)
+    controls=[args[-1] for args in state['calls'] if args[0]=='screen']
+    assert controls==['\x04','\x04'];assert not state['running'];assert state['exists']
+    assert not any(args[:2]==['docker','rm'] for args in state['calls'])
+
+
+def test_session_not_exiting_is_preserved_without_forced_stop(archived,monkeypatch):
+    state=simulated_container(archived,monkeypatch,running=True);h=archived['h'];rid=archived['run']['id']
+    state['exit_after']=99;monkeypatch.setattr(lifecycle,'EXIT_WAIT_SECONDS',0)
+    store.update(h,rid,status='archiving')
+    with pytest.raises(h.WorkflowError,match='未正常退出'):REAL_FINISH(h,rid)
+    assert state['running'] and state['exists']
+    assert not any(args[:2] in (['docker','rm'],['docker','stop'],['docker','kill']) for args in state['calls'])
+
+
+def test_migration_preserves_historical_unpinned_containers(archived):
+    h=archived['h'];rid=archived['run']['id'];before=store.run(h,rid)
+    store.update(h,rid,container_id='',cleanup_status='pending');store.initialize(h);store.initialize(h)
+    after=store.run(h,rid)
+    assert after['cleanup_status']=='preserved' and after['status']=='archived'
+    assert after['trace_sha256']==before['trace_sha256'] and after['artifact_sha']==before['artifact_sha']
+
+
+def test_cleanup_verifies_evidence_and_removes_exact_stopped_id(archived,monkeypatch):
+    state=simulated_container(archived,monkeypatch);h=archived['h'];rid=archived['run']['id']
+    result=REAL_CLEANUP(h,rid)
+    assert result['status']=='archived' and result['cleanup_status']=='complete'
+    assert [args for args in state['calls'] if args[:2]==['docker','rm']]==[['docker','rm','f'*64]]
+    assert archived['workspace'].is_dir() and Path(result['trace_path']).is_file()
+    REAL_CLEANUP(h,rid)
+    assert sum(args[:2]==['docker','rm'] for args in state['calls'])==1
+
+
+@pytest.mark.parametrize('problem',['running','identity','owner','trace'])
+def test_cleanup_preserves_unverified_or_active_container(archived,monkeypatch,problem):
+    state=simulated_container(archived,monkeypatch);h=archived['h'];rid=archived['run']['id']
+    if problem=='running':state['running']=True
+    if problem=='identity':state['id']='e'*64
+    if problem=='owner':state['run_id']='other-task'
+    if problem=='trace':
+        path=Path(archived['run']['trace_path']);path.write_text(path.read_text()+'\n')
+    result=REAL_CLEANUP(h,rid)
+    assert result['status']=='archived' and result['cleanup_status']=='failed';assert state['exists']
+    assert not any(args[:2]==['docker','rm'] for args in state['calls'])
+
+
+def test_cleanup_cannot_remove_unfinished_sample(archived,monkeypatch):
+    state=simulated_container(archived,monkeypatch);h=archived['h'];rid=archived['run']['id']
+    store.update(h,rid,status='interrupted')
+    with pytest.raises(h.WorkflowError,match='未归档'):REAL_CLEANUP(h,rid)
+    assert not state['calls']
+
+
+def test_cleanup_failure_keeps_archived_sample_and_can_retry(archived,monkeypatch):
+    state=simulated_container(archived,monkeypatch);h=archived['h'];rid=archived['run']['id']
+    store.update(h,rid,status='archive_failed');state['remove_error']=True
+    monkeypatch.setattr(lifecycle,'cleanup',REAL_CLEANUP)
+    result=workflow.archive(h,rid)
+    assert result['status']=='archived' and result['cleanup_status']=='failed' and state['exists']
+    state['remove_error']=False
+    assert REAL_CLEANUP(h,rid)['cleanup_status']=='complete'
+
+
+def test_failed_final_trace_copy_never_cleans_container(archived,monkeypatch):
+    h=archived['h'];rid=archived['run']['id'];state={'exited':False,'cleanup':False}
+    store.update(h,rid,status='archive_failed')
+    original=h.copy_container_traces
+    def copy(row,destination):
+        if state['exited']:raise h.WorkflowError('final trace copy failed')
+        return original(row,destination)
+    monkeypatch.setattr(h,'copy_container_traces',copy)
+    monkeypatch.setattr(lifecycle,'finish',lambda *_:state.update(exited=True))
+    monkeypatch.setattr(lifecycle,'cleanup',lambda *_:state.update(cleanup=True))
+    with pytest.raises(workflow.TraceUnavailable):workflow.archive(h,rid)
+    assert store.run(h,rid)['status']=='archive_failed' and not state['cleanup']

@@ -10,13 +10,17 @@ python3 app.py --open
 
 顶部的“导出列表”集中展示已归档的执行，支持关键词、任务类型和资料状态筛选、分页、跨页勾选、批量核验及 Excel/JSON 导出。待补齐记录显示具体缺项，可打开“题面与资料”继续处理；最终导出会重新核验证据。
 
-使用顺序：保存原始题目和 GitHub 初始提交链接 → 开始一次独立执行 → 必要时登记中断并继续 → 自动归档完整 JSONL 和最终提交链 → 准备干净录屏目录，实际运行并完整录屏 → 导入不超过 90 秒的视频 → 用 `gpt-6.1-sol`、`high` 分析 → 核对结果及过程反馈、播放录屏后确认 → 导出本地 Excel / JSON。保存题目不会自动调用模型。失败交付同样可录屏、评价和导出，不以低分拒绝样本。
+使用顺序：保存原始题目和 GitHub 初始提交链接 → 开始一次独立执行 → 必要时登记中断并继续 → 自动归档完整 JSONL 和最终提交链、退出并收尾容器 → 准备干净录屏目录，实际运行并完整录屏 → 导入不超过 90 秒的视频 → 用 `gpt-6.1-sol`、`high` 分析 → 核对结果及过程反馈、播放录屏后确认 → 导出本地 Excel / JSON。保存题目不会自动调用模型。失败交付同样可录屏、评价和导出，不以低分拒绝样本。
 
-任务执行继续使用甲方 `auto_model/urm`、Key 和 1M 上下文；分析通过独立 Codex CLI 认证显式选择指定模型与 high，不继承旧模型/medium 默认值，不静默降级。请先配置甲方 Key、Docker 镜像、GitHub 推送权限和可使用指定分析模型的 Codex 认证。当前执行器复用 macOS Terminal、screen 和 Docker；领域标签不代表已提供 Unity/GPU/固件等额外运行环境。
+默认 Docker 镜像已更新到 `adminfather/benzhi-claude-code:20261109`，启动前核验实际 Claude Code `2.1.319`、预置 `auto_model/urm`、网关及 1M 上下文。正式执行要求服务环境显式配置 `CLAUDE_EVAL_VENDOR_MODEL`（甲方确认的模型）和 `CLAUDE_EVAL_DOCKER_API_KEY`（甲方专用 Key）；缺少任一项时允许准备题目和检查镜像，禁止创建执行。不会从个人 Claude 配置或 `ANTHROPIC_*` 凭据回退。甲方尚未发放时保持未配置，不需要填占位 Key。
+
+任务执行使用甲方确认的模型、Key 和 1M 上下文；分析通过独立 Codex CLI 认证显式选择指定模型与 high，不继承旧模型/medium 默认值，不静默降级。请先配置甲方 Key、Docker 镜像、GitHub 推送权限和可使用指定分析模型的 Codex 认证。当前执行器复用 macOS Terminal、screen 和 Docker；领域标签不代表已提供 Unity/GPU/固件等额外运行环境。
 
 **正式模板及目的地址尚未提供，所以正式提交保持关闭。** 本地导出含 21 个专项字段；本地文件标记不能替代远端证据链接。当前录屏入口为最终快照的干净工作区与真实视频导入，未接入旧 A/B 自动演示生成器。分析审计区分请求模型和提供方返回标识：CLI 显式指定模型，提供方未返回单独标识时记为未知，不伪造实际模型证明。
 
-新增表和证据保存在 `.data/`，启动迁移前通过 SQLite 在线备份保存到 `.data/backups/before-feedback-202611-v1.sqlite3`。同一 Session 的重复开始不会重发题面；发送状态不明时保留现场，需先核对轨迹。独立重跑另建记录，不覆盖原执行。新工作区位于 `${CLAUDE_EVAL_PROJECTS_ROOT}/domain-feedback/题目ID/执行ID/`。
+新增表和证据保存在 `.data/`，本次 Docker 适配迁移前通过 SQLite 在线备份保存到 `.data/backups/before-feedback-docker-20261109.sqlite3`；此前专项初版备份继续保留。同一 Session 的重复开始不会重发题面；发送状态不明时保留现场，需先核对轨迹。独立重跑另建记录，不覆盖原执行。新工作区位于 `${CLAUDE_EVAL_PROJECTS_ROOT}/domain-feedback/题目ID/执行ID/`。
+
+任务正常完成后，先保留并推送代码提交链，再以两次 Ctrl+D 退出原会话，复制退出后的完整轨迹并重新核验，随后仅清理身份匹配且已停止的本题容器。未归档、轨迹损坏、容器身份变化或异常退出时保留现场；清理失败不使已归档样本失效，可在详情中单独重试。历史记录未绑定容器身份时不会自动删除。
 
 专项验证命令与边界见 [实施计划与验收记录](docs/FEEDBACK_202611_PLAN.md)。恢复版全量测试原有 11 个收集错误尚未修复，不能将专项测试通过描述为整个历史系统测试通过。当前尚未选择正式领域、运行真实甲方任务或验证真实分析服务；隔离测试使用模拟模型响应，不产生正式提交。
 
@@ -150,7 +154,7 @@ export CLAUDE_EVAL_PROJECTS_ROOT="/Users/zhangxinyu/claude code"
 export CLAUDE_EVAL_DEFAULT_DIRECTORY="zzzz"
 export CLAUDE_EVAL_MODEL="auto_model/urm"
 export CLAUDE_EVAL_MODELS="auto_model/urm,model_hub/example-model"
-export CLAUDE_EVAL_DOCKER_IMAGE="adminfather/benzhi-claude-code:20260909-isolated-git"
+export CLAUDE_EVAL_DOCKER_IMAGE="adminfather/benzhi-claude-code:20261109"
 export CLAUDE_EVAL_MAX_PARALLEL="4"  # 首次启动默认值；之后可在页面设为 1～6
 export CLAUDE_EVAL_HARNESS_VERSION="2.1.263"
 export CLAUDE_EVAL_SUBMITTER="张鑫宇"

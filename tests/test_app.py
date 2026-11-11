@@ -4709,7 +4709,7 @@ class RepositoryTests(unittest.TestCase):
                 paths = app.write_terminal_launcher(app.run_row(created["id"]))
 
             launcher = paths["launcher"].read_text(encoding="utf-8")
-            self.assertIn("adminfather/benzhi-claude-code:20260909-isolated-git", launcher)
+            self.assertIn("adminfather/benzhi-claude-code:20261109", launcher)
             self.assertIn("dst=/workspace", launcher)
             self.assertIn("--cap-drop ALL", launcher)
             self.assertIn("CLAUDE_EVAL_DOCKER_API_KEY", launcher)

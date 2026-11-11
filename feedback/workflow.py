@@ -4,7 +4,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import policy, store, trace
+from . import environment, lifecycle, policy, store, trace
 
 LOCK = threading.RLock()
 WORKERS = set()
@@ -22,6 +22,7 @@ def start(h, task_id, retry=False):
         previous = db.execute("SELECT * FROM feedback_runs WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT 1", (task_id,)).fetchone()
         if previous and not retry:
             return store.run(h,previous['id']),False
+        environment.require_execution_config(h)
         if retry and (not previous or previous["status"] not in {"failed","stopped"}):
             raise h.WorkflowError("只有失败或已停止的执行可以建立新 Session 重跑；中断请使用继续")
         if retry and (previous['id'] in WORKERS or h.docker_container_running(h.run_row(previous['id'])['container_name'])):
@@ -70,7 +71,7 @@ def enqueue(h, run_id, reserved=False):
                 execute(h,run_id)
         except Exception as exc:
             current = store.run(h,run_id)
-            if current["status"] not in {"stopped","archive_failed"}:
+            if current["status"] not in {"stopped","archive_failed","archived"}:
                 status = "interrupted" if current["prompt_sent"] and current["first_session_id"] else "failed"
                 store.update(h,run_id,status=status,error=str(exc),detail="现场已保留，请检查后继续或重新归档")
                 store.event(h,run_id,f"执行暂停：{exc}")
@@ -85,7 +86,6 @@ def active(h, run_id):
 
 
 def execute(h, run_id):
-    from pairwise import environment
     r = store.run(h,run_id)
     t = store.task(h,r["task_id"])
     row = h.run_row(run_id)
@@ -102,11 +102,12 @@ def execute(h, run_id):
         store.update(h,run_id,config=config)
         if not active(h,run_id):
             return
-        h.launch_docker_terminal(row,image=config["image"])
+        h.launch_docker_terminal(row,image=config["image"],vendor_credentials=True)
         h.wait_for_docker_container(run_id,row["container_name"])
         h.accept_container_permission_prompt(run_id,row["screen_name"],row["container_name"])
         environment.verify_host(h,config)
-        environment.verify_container(h,row["container_name"],config,policy.EXECUTION_MODEL)
+        verified=environment.verify_container(h,row["container_name"],config,policy.EXECUTION_MODEL)
+        store.update(h,run_id,container_id=verified['container_id'])
         if not active(h,run_id):
             return
         h.run_command(["git","clone","--no-checkout",t["repo_url"],str(workspace)],timeout=180)
@@ -206,7 +207,6 @@ def monitor(h, run_id):
 
 
 def resume(h, run_id, reason):
-    from pairwise import environment
     reason = str(reason or "").strip()
     if not reason:
         raise h.WorkflowError("请填写模型自行中断的实际情况")
@@ -307,12 +307,21 @@ def archive(h, run_id):
     store.update(h,run_id,status="archiving",detail="保留模型提交历史并归档完整轨迹")
     try:
         sha,tree = checkpoint(h,run_id)
+        lifecycle.finish(h,run_id)
+        final=sync_trace(h,run_id)
+        current=store.run(h,run_id)
+        strict=trace.inspect(Path(current['trace_path']),task['prompt'],current['first_session_id'],current['resume_count'])
+        if not final or not strict['complete']:raise h.WorkflowError('会话退出后的完整轨迹未通过核验，容器保留')
+        workspace=Path(h.run_row(run_id)['repo_path'])
+        if h.run_command(['git','rev-parse','HEAD'],cwd=workspace).stdout.strip()!=sha or h.run_command(['git','diff','--quiet','HEAD'],cwd=workspace,check=False).returncode:
+            raise h.WorkflowError('会话退出期间产物发生变化，保留现场后重试归档')
         store.update(h,run_id,status="archived",detail="证据已归档，可关联完整录屏并分析",artifact_sha=sha,artifact_tree=tree,error="",review_confirmed=0)
-        h.update_run(run_id,phase="first_idle",first_result=state["result"])
+        h.update_run(run_id,phase="first_idle",first_result=strict["result"])
         store.event(h,run_id,f"最终快照 {sha}，完整轨迹已保存；未改写模型提交历史")
     except Exception as exc:
         store.update(h,run_id,status="archive_failed",detail="归档失败，原现场保留，可单独重试归档",error=str(exc))
         raise
+    lifecycle.cleanup(h,run_id)
     return store.run(h,run_id)
 
 
@@ -359,6 +368,7 @@ def recover(h):
     with h.db_connection() as db:
         rows = db.execute("SELECT id,status,prompt_sent FROM feedback_runs WHERE status IN ('queued','starting','running','resuming','archiving')").fetchall()
         db.execute("UPDATE feedback_runs SET analysis_status='failed',analysis_error='服务重启，可重试分析' WHERE analysis_status='running'")
+        cleanup_rows=db.execute("SELECT id FROM feedback_runs WHERE status='archived' AND cleanup_status='pending' AND container_id<>''").fetchall()
     # Count detached execution first, before any newly queued task can launch.
     detached=[row for row in rows if row['prompt_sent'] and row['status'] in {'running','resuming'}]
     for row in detached:h.reserve_existing_worker_slot()
@@ -369,6 +379,8 @@ def recover(h):
             enqueue(h,row["id"])
         else:
             store.update(h,row["id"],status="archive_failed" if row["status"]=="archiving" else "failed",detail="重启现场已保留；启动状态不明时不自动重发 Prompt")
+    for row in cleanup_rows:
+        threading.Thread(target=lifecycle.cleanup,args=(h,row['id']),daemon=True,name=f"feedback-cleanup-{row['id']}").start()
 
 
 def shutdown():

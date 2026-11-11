@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import analysis, export, media, policy, review, store, workflow
+from . import analysis, environment, export, lifecycle, media, policy, review, store, workflow
 
 PREFIX = '/api/feedback'
 ID = r'([a-f0-9]{12})'
@@ -13,8 +13,12 @@ ID = r'([a-f0-9]{12})'
 def status(h):
     source=h.dependency_status()
     keys=('ready','github_owner','github_account','projects_root','submitter','app_version',
-          'service_pid','codex_version','docker_image','api_key_source','commands','max_parallel')
-    return {**{k:source.get(k) for k in keys},**policy.schema(),'profile':store.profile(h)}
+          'service_pid','codex_version','harness_version','docker_image','commands','max_parallel')
+    configured=environment.configuration(h)
+    return {**{k:source.get(k) for k in keys},**policy.schema(),**configured,'profile':store.profile(h),
+            'infrastructure_ready':source.get('ready',False),
+            'image_verified':source.get('harness_version')==environment.HARNESS_VERSION,
+            'ready':bool(source.get('ready') and configured['execution_ready'] and source.get('harness_version')==environment.HARNESS_VERSION)}
 
 
 def check_write(request, h):
@@ -34,13 +38,16 @@ def check_write(request, h):
 def get(request, h, path, query):
     route = path[len(PREFIX):]
     if route in {'', '/config'}:
-        request.send_json({**policy.schema(), 'profile':store.profile(h)})
+        request.send_json({**policy.schema(),**environment.configuration(h), 'profile':store.profile(h)})
     elif route == '/tasks':
         request.send_json(store.listing(h, query))
     elif route == '/exports':
         request.send_json(export.listing(h,query))
     elif route == '/environment':
-        request.send_json(status(h))
+        result=status(h)
+        try:result['image_check']=environment.inspect_image(h)
+        except Exception as exc:result.update(image_check_error=str(exc),image_verified=False,ready=False)
+        request.send_json(result)
     elif route=='/history' or route.startswith('/history/'):
         from .archive import get as get_archive
         get_archive(request,h,path,query)
@@ -111,6 +118,10 @@ def post(request, h, path, query=None):
         if action=='resume':result=workflow.resume(h,run_id,payload.get('reason'))
         elif action=='interrupted':result=workflow.mark_interrupted(h,run_id,payload.get('reason'))
         elif action=='stop':result=workflow.stop(h,run_id)
+        elif action=='cleanup':
+            with workflow.LOCK:
+                if run_id in workflow.WORKERS:raise h.WorkflowError('后台正在完成归档收尾，请稍后再试')
+                result=lifecycle.cleanup(h,run_id)
         elif action=='prepare-recording':
             with workflow.LOCK:result=workflow.prepare_recording(h,run_id)
         elif action=='archive':
