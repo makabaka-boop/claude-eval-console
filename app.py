@@ -148,8 +148,9 @@ SOLO_QA_PROJECT_REJECTION_MARKERS = (
     "题材不合格",
 )
 SUBMITTER_NAME = os.environ.get("CLAUDE_EVAL_SUBMITTER", "张鑫宇").strip() or "张鑫宇"
-APP_VERSION = "20261003.4"
-PAIRWISE_MODE = os.environ.get("CLAUDE_EVAL_LEGACY_MODE") != "1"
+APP_VERSION = "20261111.1"
+FEEDBACK_MODE = os.environ.get("CLAUDE_EVAL_WORKFLOW", "feedback") == "feedback" and os.environ.get("CLAUDE_EVAL_LEGACY_MODE") != "1"
+PAIRWISE_MODE = not FEEDBACK_MODE and os.environ.get("CLAUDE_EVAL_LEGACY_MODE") != "1"
 PAIRWISE_HISTORY_PATH = APP_DIR / "gsb历史题库.md"
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$")
@@ -17660,7 +17661,11 @@ class ApiHandler(BaseHTTPRequestHandler):
         return value
 
     def serve_static(self, request_path: str) -> None:
-        if PAIRWISE_MODE and request_path in {"", "/"}:
+        if FEEDBACK_MODE and request_path == "/pairwise.html":
+            request_path = "/feedback-history.html"
+        if FEEDBACK_MODE and request_path in {"", "/"}:
+            request_path = "/feedback.html"
+        elif PAIRWISE_MODE and request_path in {"", "/"}:
             request_path = "/pairwise.html"
         relative = "index.html" if request_path in {"", "/"} else unquote(request_path.lstrip("/"))
         target = (STATIC_DIR / relative).resolve()
@@ -17681,7 +17686,11 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         path = urlparse(self.path).path
-        if PAIRWISE_MODE and path in {"", "/"}:
+        if FEEDBACK_MODE and path == "/pairwise.html":
+            path = "/feedback-history.html"
+        if FEEDBACK_MODE and path in {"", "/"}:
+            path = "/feedback.html"
+        elif PAIRWISE_MODE and path in {"", "/"}:
             path = "/pairwise.html"
         relative = "index.html" if path in {"", "/"} else unquote(path.lstrip("/"))
         target = (STATIC_DIR / relative).resolve()
@@ -17700,12 +17709,23 @@ class ApiHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         try:
+            if path == "/api/feedback" or path.startswith("/api/feedback/"):
+                from feedback.api import get
+                get(self, sys.modules[__name__], path, parse_qs(parsed.query))
+                return
             if path.startswith("/api/pairwise"):
-                from pairwise.api import get
+                if FEEDBACK_MODE:
+                    from feedback.archive import get
+                else:
+                    from pairwise.api import get
                 get(self, sys.modules[__name__], path, parse_qs(parsed.query))
                 return
             if path == "/api/health":
-                self.send_json(dependency_status())
+                if FEEDBACK_MODE:
+                    from feedback.api import status
+                    self.send_json(status(sys.modules[__name__]))
+                else:
+                    self.send_json(dependency_status())
                 return
             if path == "/api/runs":
                 self.send_json(paginated_runs(parse_qs(parsed.query)))
@@ -17782,6 +17802,14 @@ class ApiHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         try:
+            if path == "/api/feedback" or path.startswith("/api/feedback/"):
+                if not FEEDBACK_MODE:
+                    raise WorkflowError("请在专项模式启动服务后操作")
+                from feedback.api import post
+                post(self, sys.modules[__name__], path, parse_qs(urlparse(self.path).query))
+                return
+            if FEEDBACK_MODE:
+                raise WorkflowError("历史 A/B 和旧版任务为只读归档，请使用领域专项入口")
             payload = self.read_json()
             if path.startswith("/api/pairwise"):
                 from pairwise.api import post
@@ -17902,7 +17930,7 @@ class ApiHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
         try:
-            if PAIRWISE_MODE:
+            if FEEDBACK_MODE or PAIRWISE_MODE:
                 raise WorkflowError("旧版为只读归档")
             match = re.fullmatch(r"/api/runs/([a-f0-9]{12})", path)
             if not match:
@@ -18241,46 +18269,58 @@ def main() -> None:
         previous_sigterm = signal.getsignal(signal.SIGTERM)
 
         def request_shutdown(_signum: int, _frame: Any) -> None:
+            if FEEDBACK_MODE:
+                from feedback import workflow, analysis
+                workflow.shutdown()
+                analysis.shutdown()
             cancel_all_background_jobs()
             threading.Thread(target=server.shutdown, daemon=True).start()
 
         try:
-            if PAIRWISE_MODE and DB_PATH.exists():
-                from pairwise.models import backup_database
+            if DB_PATH.exists() and (FEEDBACK_MODE or PAIRWISE_MODE):
+                if FEEDBACK_MODE:
+                    from feedback.store import backup_database
+                else:
+                    from pairwise.models import backup_database
                 backup_database(DB_PATH)
             initialize_database()
             from pairwise.models import initialize as initialize_pairs
             initialize_pairs(sys.modules[__name__])
-            from pairwise.candidate_bank import initialize as initialize_candidate_bank
-            initialize_candidate_bank(sys.modules[__name__])
-            from pairwise.notebook import initialize as initialize_pairwise_notebook
-            initialize_pairwise_notebook(sys.modules[__name__])
-            from pairwise.bug_references import initialize as initialize_bug_references
-            initialize_bug_references(sys.modules[__name__])
-            from pairwise.history import ensure as ensure_pairwise_history
-            ensure_pairwise_history(sys.modules[__name__])
-            if PAIRWISE_MODE:
-                from pairwise.upstream import clear_legacy_pause
-                clear_legacy_pause(sys.modules[__name__])
-                from pairwise.notebook import backfill as backfill_local_notebook
-                backfill_local_notebook(sys.modules[__name__])
-            task_mix_started_at()
-            collection_score_started_at()
-            PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
-            resolve_project_directory(DEFAULT_PROJECT_DIRECTORY)[1].mkdir(parents=True, exist_ok=True)
-            if PAIRWISE_MODE:
-                from pairwise.workflow import recover
-                recover(sys.modules[__name__])
-                from pairwise.bug_lab import recover as recover_bug_bank
-                recover_bug_bank(sys.modules[__name__])
-                from pairwise.difficulty import recover as recover_pairwise_difficulty
-                recover_pairwise_difficulty(sys.modules[__name__])
-                from pairwise.recording import recover as recover_pairwise_recordings
-                recover_pairwise_recordings(sys.modules[__name__])
+            if FEEDBACK_MODE:
+                from feedback import store as feedback_store, workflow as feedback_workflow
+                feedback_store.initialize(sys.modules[__name__])
+                feedback_workflow.recover(sys.modules[__name__])
             else:
-                migrate_completed_legacy_iterations()
-                recover_iteration_jobs()
-                recover_monitors()
+                from pairwise.candidate_bank import initialize as initialize_candidate_bank
+                initialize_candidate_bank(sys.modules[__name__])
+                from pairwise.notebook import initialize as initialize_pairwise_notebook
+                initialize_pairwise_notebook(sys.modules[__name__])
+                from pairwise.bug_references import initialize as initialize_bug_references
+                initialize_bug_references(sys.modules[__name__])
+                from pairwise.history import ensure as ensure_pairwise_history
+                ensure_pairwise_history(sys.modules[__name__])
+                if PAIRWISE_MODE:
+                    from pairwise.upstream import clear_legacy_pause
+                    clear_legacy_pause(sys.modules[__name__])
+                    from pairwise.notebook import backfill as backfill_local_notebook
+                    backfill_local_notebook(sys.modules[__name__])
+                task_mix_started_at()
+                collection_score_started_at()
+                PROJECTS_ROOT.mkdir(parents=True, exist_ok=True)
+                resolve_project_directory(DEFAULT_PROJECT_DIRECTORY)[1].mkdir(parents=True, exist_ok=True)
+                if PAIRWISE_MODE:
+                    from pairwise.workflow import recover
+                    recover(sys.modules[__name__])
+                    from pairwise.bug_lab import recover as recover_bug_bank
+                    recover_bug_bank(sys.modules[__name__])
+                    from pairwise.difficulty import recover as recover_pairwise_difficulty
+                    recover_pairwise_difficulty(sys.modules[__name__])
+                    from pairwise.recording import recover as recover_pairwise_recordings
+                    recover_pairwise_recordings(sys.modules[__name__])
+                else:
+                    migrate_completed_legacy_iterations()
+                    recover_iteration_jobs()
+                    recover_monitors()
             signal.signal(signal.SIGTERM, request_shutdown)
             url = f"http://{args.host}:{args.port}"
             print(f"Claude Eval Console running at {url}")
@@ -18291,6 +18331,10 @@ def main() -> None:
         except KeyboardInterrupt:
             pass
         finally:
+            if FEEDBACK_MODE:
+                from feedback import workflow, analysis
+                workflow.shutdown()
+                analysis.shutdown()
             if PAIRWISE_MODE:
                 from pairwise.recording import shutdown as shutdown_pairwise_recordings
                 shutdown_pairwise_recordings()
