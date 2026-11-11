@@ -2,6 +2,8 @@
 
 本期采用单会话首轮执行、交付完整性评分和人工 Feedback。该分支从 `codex/recovered-code-20261111` 的 `93fece2` 创建，用于后续专项改造；本次提交保存需求材料，业务代码仍处于恢复版状态，完整性限制见仓库根目录的 `RECOVERY_STATUS.json`。
 
+分批实施顺序和验收标准见[领域专项改造计划](FEEDBACK_202611_PLAN.md)。
+
 来源：[CC/Codex 用户反馈标注说明 26.11 领域专项原始 PDF](specs/CC_Codex_feedback_26.11_domain.pdf)，共 15 页。原始 PDF 按字节保存，SHA-256 为 `5641fe5c2df403926d65c9bac149c563978e35d0d7248a26331e6f9c6c82a129`。
 
 ## 核心流程变化
