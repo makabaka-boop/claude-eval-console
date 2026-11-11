@@ -45,6 +45,14 @@ def is_paused(h):
     return h.settings_values((STATE_KEY,)).get(STATE_KEY, "ready") == "paused"
 
 
+def clear_legacy_pause(h):
+    """Discard the old global pause state without restarting past attempts."""
+    initialize(h)
+    h.write_settings({STATE_KEY: "ready", REASON_KEY: "", PAUSED_AT_KEY: "",
+                      NEXT_PROBE_KEY: "", PRIORITY_PAIRS_KEY: "[]"})
+    WAKE.set()
+
+
 def status(h):
     initialize(h)
     values = h.settings_values((STATE_KEY, REASON_KEY, PAUSED_AT_KEY,
