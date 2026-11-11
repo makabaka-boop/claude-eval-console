@@ -61,6 +61,7 @@
   </section>
   <section id="detail-view" hidden></section>
 </main>
+<datalist id="project-directories"></datalist>
 <dialog id="create-dialog">
   <form id="create-form">
     <div class="heading"><h2>新建 Pair</h2><button type="button" class="secondary" id="close-create">关闭</button></div>
@@ -102,11 +103,5 @@
     <div class="recording-dialog-actions"><button type="submit">开始录制</button></div>
   </form>
 </dialog>
-<script src="/pairwise.js?v=52" defer></script>
+<script src="/pairwise.js?v=53" defer></script>
 </body></html>
-.badge { display: inline-block; border-radius: 999px; padding: 5px 10px; background: var(--brand-soft); color: #3c6257; font-size: 11px; font-weight: 650; white-space: nowrap; }
-.task-status-tag { display: inline-flex; align-items: center; gap: 6px; min-height: 27px; padding: 4px 9px; border: 1px solid transparent; border-radius: 999px; font-size: 11px; font-weight: 650; line-height: 1.5; white-space: nowrap; }
-.task-status-tag::before { content: ""; width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: currentColor; }
-.task-status-tag.busy { color: #285d95; background: #edf4fb; border-color: #d9e7f6; }
-.task-status-tag.success { color: #2f6b51; background: #e8f4ed; border-color: #d6e9de; }
-.task-status-tag.warning { color: #805a16; background: #fff6e4; border-color: #f1e2bf; }
