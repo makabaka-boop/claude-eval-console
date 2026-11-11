@@ -6,13 +6,23 @@
   <script src="/feedback.js" defer></script>
 </head>
 <body>
-<header class="top"><a class="brand" href="/">F<span>领域专项 <b>Feedback</b></span></a><nav><button id="environment">检查环境</button><a href="/pairwise.html">历史 A/B 归档 ↗</a></nav></header>
+<header class="top"><a class="brand" href="/">F<span>领域专项 <b>Feedback</b></span></a><nav><a id="nav-tasks" href="#tasks">任务列表</a><a id="nav-exports" href="#exports">导出列表</a><button id="environment">检查环境</button><a href="/pairwise.html">历史 A/B 归档 ↗</a></nav></header>
 <main>
+<section id="task-view">
   <section class="intro"><div><p class="eyebrow">NOVEMBER 2026 · DOMAIN FEEDBACK</p><h1>一条任务，完整记录。</h1><p class="muted">单 Session 执行，保留原始轨迹、产物与运行录屏，再完成结果和过程评价。</p></div><button class="primary" id="new-task">＋ 新建题目</button></section>
   <section class="rules"><div><span class="small">本期个人领域</span><button id="profile-open" class="profile">尚未选择 →</button></div><div><span class="small">任务执行</span><strong>甲方 auto · 1M</strong></div><div><span class="small">分析与评价</span><strong>gpt-6.1-sol · high</strong></div><div><span class="small">正式提交</span><strong class="amber">等待模板配置</strong></div></section>
   <div class="notice" id="domain-notice">领域可以最后选。通用流程已就绪，实际建题前再固定本期的一个领域。</div>
   <section class="panel task-panel"><div class="panel-head"><div><p class="eyebrow">TASKS</p><h2>专项题目 <span id="total" class="count">0</span></h2></div><div class="filters"><input id="search" placeholder="搜索标题或 Prompt" aria-label="搜索标题或 Prompt"><select id="type-filter" aria-label="按任务类型筛选"><option value="">全部任务类型</option></select><button id="refresh">刷新</button></div></div><div id="tasks" aria-live="polite"><p class="empty">正在读取任务…</p></div><footer class="pager"><span id="page-label">第 1 页</span><div><button id="prev">上一页</button><button id="next">下一页</button></div></footer></section>
   <p class="footnote">同一 Repo 可出多道独立题。中断仅发送“继续”，所有续写归并为一条样本，提交定位始终为首轮。</p>
+</section>
+<section id="export-view" hidden>
+  <section class="intro"><div><p class="eyebrow">EXPORTS · SINGLE SESSION</p><h1>导出列表</h1><p class="muted">集中核对已归档的执行，补齐证据与评价后，批量导出本期专项数据。</p></div><a href="#tasks">← 返回任务列表</a></section>
+  <div class="export-summary" aria-live="polite"><span>已归档 <strong id="export-candidates">0</strong></span><span>可导出 <strong id="export-ready">0</strong></span><span>待补齐 <strong id="export-pending">0</strong></span></div>
+  <div class="export-toolbar"><div><strong id="export-selected">已选 0 条</strong><span class="hint">支持跨页勾选，最多 200 条</span></div><div class="actions"><button id="export-clear" disabled>清空选择</button><button id="export-check" disabled>核验所选</button><button id="export-batch-json" disabled>导出 JSON</button><button id="export-batch-xlsx" class="primary" disabled>导出 Excel</button></div></div>
+  <div id="export-check-result" class="notice" role="status" hidden></div>
+  <section class="panel"><div class="panel-head"><h2>已归档执行 <span id="export-total" class="count">0</span></h2><div class="filters"><input id="export-search" placeholder="搜索题面、仓库或首轮 ID" aria-label="搜索导出记录"><select id="export-type" aria-label="导出任务类型"><option value="">全部任务类型</option></select><select id="export-readiness" aria-label="导出资料状态"><option value="all">全部已归档</option><option value="ready">仅可导出</option><option value="pending">仅待补齐</option></select><button id="export-refresh">刷新</button></div></div><div class="export-table-scroll"><table class="export-table"><thead><tr><th><input id="export-select-page" type="checkbox" aria-label="勾选本页可导出记录"></th><th>题目 / 分类</th><th>首轮提交定位</th><th>证据 / 评价</th><th>导出状态</th><th>操作</th></tr></thead><tbody id="export-rows"><tr><td colspan="6" class="empty">正在读取归档记录…</td></tr></tbody></table></div><footer class="pager"><span id="export-page">第 1 页</span><div><button id="export-prev">上一页</button><button id="export-next">下一页</button></div></footer></section>
+  <p class="footnote">每个原始任务及其续写只占一行，提交定位仍为首轮。导出时会重新核验完整证据；正式提交等待本期模板与地址。</p>
+</section>
 </main>
 <div id="toast" role="status" popover="manual" hidden></div>
 

@@ -440,6 +440,79 @@ def test_export_rejects_malformed_ids(host):
     with pytest.raises(host.WorkflowError):export.rows(host,[{}])
 
 
+def test_export_list_includes_missing_evidence_and_filters_ready(archived):
+    h=archived['h'];rid=archived['run']['id']
+    workflow.start(h,create(h,title='尚未完成的任务')['id'])
+    page=export.listing(h,{})
+    assert page['total']==1;assert page['pending_count']==1;assert page['ready_count']==0
+    assert page['items'][0]['id']==rid;assert '缺少完整运行录屏' in page['items'][0]['preflight']['issues']
+    assert export.listing(h,{'readiness':['ready']})['items']==[]
+    approved(archived)
+    page=export.listing(h,{'readiness':['ready'],'query':['first-id']})
+    assert page['total']==1;assert page['ready_count']==1
+    assert page['items'][0]['first_turn_id']=='first-id'
+    assert export.listing(h,{'readiness':['pending']})['total']==0
+    assert export.listing(h,{'task_type':['Bugfix']})['total']==0
+    attach_video(archived,25)
+    assert export.listing(h,{'readiness':['ready']})['total']==0
+    assert export.listing(h,{'readiness':['pending']})['total']==1
+
+
+def test_export_list_pagination_type_and_operator_isolation(host):
+    ids=[]
+    for number in range(23):
+        task=create(host,title=f'分页记录 {number}',task_type='Bugfix' if number%2 else '功能开发')
+        r,_=workflow.start(host,task['id']);store.update(host,r['id'],status='archived');ids.append(r['id'])
+    first=export.listing(host,{})
+    second=export.listing(host,{'page':['2']})
+    assert first['total']==23 and len(first['items'])==20 and len(second['items'])==3
+    assert {i['id'] for i in first['items']+second['items']}==set(ids)
+    assert export.listing(host,{'page':['999']})['page']==2
+    assert export.listing(host,{'task_type':['Bugfix']})['total']==11
+    with host.db_connection() as db:
+        db.execute('UPDATE feedback_tasks SET operator=? WHERE id=(SELECT task_id FROM feedback_runs WHERE id=?)',('other-operator',ids[0]))
+    assert export.listing(host,{})['total']==22
+    with pytest.raises(host.WorkflowError):export.listing(host,{'readiness':['unrecognized']})
+
+
+def another_archived(fixture,title='另一条归档样本'):
+    """Isolated listing fixture sharing immutable Git objects, no execution."""
+    h=fixture['h'];task=create(h,title=title,initial_snapshot=fixture['task']['initial_snapshot'])
+    r,_=workflow.start(h,task['id']);rid=r['id'];source=store.run(h,fixture['run']['id'])
+    fields={key:source[key] for key in store.RUN_FIELDS}
+    session='session-'+rid
+    events=[json.loads(line) for line in Path(source['trace_path']).read_text().splitlines()]
+    for event in events:event['sessionId']=session
+    raw=write_trace(h.DATA_DIR/'fixture-traces'/rid,events)
+    fields.update(first_session_id=session,trace_path=str(raw),trace_sha256=review.file_digest(raw),
+                  config=store.raw_config(h,fixture['run']['id']))
+    store.update(h,rid,**fields)
+    with h.db_connection() as db:db.execute('UPDATE runs SET repo_path=? WHERE id=?',(str(fixture['workspace']),rid))
+    return {**fixture,'task':task,'run':store.run(h,rid),'raw':raw}
+
+
+def test_export_list_http_batch_and_deep_recheck(archived,http):
+    h=archived['h'];first=approved(archived);second_fixture=another_archived(archived);second=approved(second_fixture)
+    ids=[second['id'],first['id']]
+    status,body=http_request(http,'/api/feedback/exports?readiness=ready')
+    assert status==200;page=json.loads(body);assert page['total']==2
+    status,body=http_request(http,'/api/feedback/exports/preflight',{'run_ids':ids})
+    assert status==200 and json.loads(body)['ready_for_local_export']
+    status,body=http_request(http,'/api/feedback/exports/json',{'run_ids':ids})
+    assert status==200;bundle=json.loads(body);assert len(bundle['rows'])==2
+    assert [row[11] for row in bundle['rows']]==[second['first_session_id'],first['first_session_id']]
+    status,body=http_request(http,'/api/feedback/exports/xlsx',{'run_ids':ids})
+    assert status==200
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        sheet=ET.fromstring(archive.read('xl/worksheets/sheet1.xml'))
+        assert len(sheet.findall('.//{'+export.NS+'}row'))==3
+    path=Path(second['trace_path']);path.write_text(path.read_text()+'\n')
+    status,body=http_request(http,'/api/feedback/exports/preflight',{'run_ids':ids})
+    assert status==200 and not json.loads(body)['ready_for_local_export']
+    status,body=http_request(http,'/api/feedback/exports/json',{'run_ids':ids})
+    assert status==400;assert second['id'] in body.decode()
+
+
 def test_changed_trace_and_recording_invalidate_confirmation(archived):
     h=archived['h'];r=approved(archived);path=Path(r['trace_path']);path.write_text(path.read_text()+'\n')
     checked=review.preflight(h,r['id'],deep=True)

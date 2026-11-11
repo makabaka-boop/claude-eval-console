@@ -14,9 +14,53 @@ COLUMNS=('User Prompt','所属领域','子方向','任务类型','任务难度',
 NS='http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 
 
+def listing(h,query):
+    """Page archived Sessions, including records that still need evidence."""
+    try:page=max(1,int(query.get('page',[1])[0]))
+    except (ValueError,TypeError):raise h.WorkflowError('页码须为整数')
+    readiness=query.get('readiness',['all'])[0]
+    if readiness not in {'all','ready','pending'}:raise h.WorkflowError('导出状态筛选无效')
+    search=str(query.get('query',[''])[0])[:200]
+    kind=query.get('task_type',[''])[0]
+    if kind and kind not in policy.TASK_TYPES:raise h.WorkflowError('任务类型筛选无效')
+    where="""r.status='archived' AND t.operator=? AND
+        (t.title LIKE ? OR t.prompt LIKE ? OR t.repo_name LIKE ? OR r.first_session_id LIKE ? OR r.first_turn_id LIKE ?)"""
+    args=[h.SUBMITTER_NAME,*([f'%{search}%']*5)]
+    if kind:where+=' AND t.task_type=?';args.append(kind)
+    with h.db_connection() as db:
+        candidates=db.execute(f'''SELECT r.id,r.task_id,r.first_session_id,r.first_turn_id,
+            r.delivery_score,r.recording_seconds,r.analysis_status,r.review_confirmed,
+            r.trace_path,r.recording_path,r.artifact_sha,r.created_at,
+            t.title,t.repo_name,t.domain,t.subdirection,t.task_type,t.difficulty
+            FROM feedback_runs r JOIN feedback_tasks t ON t.id=r.task_id WHERE {where}
+            ORDER BY r.created_at DESC,r.id DESC''',args).fetchall()
+    items=[];ready=0
+    for row in candidates:
+        item=dict(row);checked=review.preflight(h,item['id'])
+        ready+=int(checked['ready_for_local_export'])
+        if readiness=='ready' and not checked['ready_for_local_export']:continue
+        if readiness=='pending' and checked['ready_for_local_export']:continue
+        item.update(preflight=checked,has_trace=bool(item.pop('trace_path')),has_recording=bool(item.pop('recording_path')))
+        items.append(item)
+    total=len(items);pages=max(1,(total+19)//20);page=min(page,pages)
+    return {'items':items[(page-1)*20:page*20],'total':total,'page':page,'pages':pages,
+            'ready_count':ready,'pending_count':len(candidates)-ready,'candidate_total':len(candidates)}
+
+
+def validate_ids(h,ids):
+    if not isinstance(ids,list) or not ids or len(ids)>200 or any(not isinstance(i,str) or not re.fullmatch('[a-f0-9]{12}',i) for i in ids) or len(set(ids))!=len(ids):
+        raise h.WorkflowError('请选择 1–200 条不重复的执行记录')
+
+
+def preflight(h,ids):
+    validate_ids(h,ids)
+    items=[{'run_id':run_id,**review.preflight(h,run_id,deep=True)} for run_id in ids]
+    return {'items':items,'ready_for_local_export':all(i['ready_for_local_export'] for i in items)}
+
+
 def values(h,run_id):
     checked=review.preflight(h,run_id,deep=True)
-    if not checked['ready_for_local_export']:raise h.WorkflowError('导出前请补齐：'+'；'.join(checked['issues']))
+    if not checked['ready_for_local_export']:raise h.WorkflowError(f'执行 {run_id} 导出前请补齐：'+'；'.join(checked['issues']))
     r=store.run(h,run_id);t=store.task(h,r['task_id']);c=r['config']
     return [t['prompt'],t['domain'],t['subdirection'],t['task_type'],t['difficulty'],t['languages'],
             c.get('harness',''),c.get('harness_version',''),c.get('operating_system',''),t['reproducibility'],
@@ -29,8 +73,7 @@ def values(h,run_id):
 
 
 def rows(h,ids):
-    if not isinstance(ids,list) or not ids or len(ids)>200 or any(not isinstance(i,str) or not re.fullmatch('[a-f0-9]{12}',i) for i in ids) or len(set(ids))!=len(ids):
-        raise h.WorkflowError('请选择 1–200 条不重复的执行记录')
+    validate_ids(h,ids)
     return [values(h,run_id) for run_id in ids]
 
 

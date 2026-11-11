@@ -12,13 +12,13 @@ async function request(path,body,raw=false){
   return response;
 }
 async function json(path,body){return (await request(path,body)).json();}
-async function busy(button,work){if(state.busy)return;state.busy=true;if(button)button.disabled=true;try{await work();}catch(error){notify(error.message);}finally{state.busy=false;if(button?.isConnected)button.disabled=false;}}
+async function busy(button,work){if(state.busy)return;state.busy=true;if(button)button.disabled=true;updateExportSelection();try{await work();}catch(error){notify(error.message);}finally{state.busy=false;if(button?.isConnected)button.disabled=false;updateExportSelection();}}
 function show(id){const dialog=$(id);if(!dialog.open)dialog.showModal();}
 document.addEventListener('click',event=>{const close=event.target.closest('[data-close]');if(close&&!state.busy)close.closest('dialog').close();});
 document.querySelectorAll('dialog').forEach(d=>d.addEventListener('cancel',event=>{if(state.busy)event.preventDefault();}));
 function setOptions(select,values,blank){select.innerHTML=(blank===undefined?'':option('',blank))+values.map(v=>option(v)).join('');}
 function renderProfile(){const p=state.config.profile;$('#profile-open').textContent=p.domain||'尚未选择 →';$('#profile-open').disabled=p.locked;$('#domain-notice').hidden=p.locked;}
-async function configure(){state.config=await json('/config');renderProfile();setOptions($('#profile-form select'),Object.keys(state.config.domains),'请选择');setOptions($('#type-filter'),state.config.task_types,'全部任务类型');setOptions($('#task-form [name=task_type]'),state.config.task_types);setOptions($('#task-form [name=difficulty]'),state.config.difficulties);setOptions($('#task-form [name=reproducibility]'),state.config.reproducibility,'暂不填写');}
+async function configure(){state.config=await json('/config');renderProfile();setOptions($('#profile-form select'),Object.keys(state.config.domains),'请选择');setOptions($('#type-filter'),state.config.task_types,'全部任务类型');setOptions($('#export-type'),state.config.task_types,'全部任务类型');setOptions($('#task-form [name=task_type]'),state.config.task_types);setOptions($('#task-form [name=difficulty]'),state.config.difficulties);setOptions($('#task-form [name=reproducibility]'),state.config.reproducibility,'暂不填写');}
 $('#profile-open').onclick=()=>show('#profile-dialog');
 $('#profile-form').onsubmit=event=>{event.preventDefault();busy(event.submitter,async()=>{state.config.profile=await json('/profile',{domain:$('#profile-form select').value});renderProfile();$('#profile-dialog').close();notify('本期领域已固定，可开始建题');});};
 $('#new-task').onclick=()=>{if(!state.config?.profile.domain){show('#profile-dialog');return;}$('#task-domain').value=state.config.profile.domain;setOptions($('#task-form [name=subdirection]'),state.config.domains[state.config.profile.domain]);show('#task-dialog');};
@@ -90,8 +90,69 @@ $('#analyze').onclick=event=>busy(event.target,async()=>{await json(`/runs/${sta
 async function saveReview(confirm){const payload={...reviewValues(),confirm,evidence_source:state.run.preflight?.evidence_source};await json(`/runs/${state.run.id}/review`,payload);localStorage.removeItem('feedback-review-'+state.run.id);state.dirty=false;state.editorKey='';await refreshRun();notify(confirm?'复核已确认，可以进行本地导出':'评价草稿已保存');}
 $('#save-draft').onclick=event=>busy(event.target,()=>saveReview(false));$('#review-form').onsubmit=event=>{event.preventDefault();busy(event.submitter,()=>saveReview(true));};
 $('#preflight-button').onclick=event=>busy(event.target,async()=>{const checked=await json(`/runs/${state.run.id}/preflight`,{});state.run.preflight=checked;renderPreflight(checked);notify(checked.ready_for_local_export?'证据核验通过':'核验完成，请补齐列出的项目');});
-async function download(format){const response=await request('/exports/'+format,{run_ids:[state.run.id]});const url=URL.createObjectURL(await response.blob());const anchor=document.createElement('a');anchor.href=url;anchor.download='domain-feedback-local.'+format;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+async function download(format,ids=[state.run.id]){const response=await request('/exports/'+format,{run_ids:ids});const url=URL.createObjectURL(await response.blob());const anchor=document.createElement('a');anchor.href=url;anchor.download='domain-feedback-local.'+format;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 $('#export-xlsx').onclick=event=>busy(event.target,()=>download('xlsx'));$('#export-json').onclick=event=>busy(event.target,()=>download('json'));
 $('#environment').onclick=event=>busy(event.target,async()=>{show('#environment-dialog');$('#environment-result').textContent='正在检查本机依赖…';const result=await json('/environment');$('#environment-result').textContent=JSON.stringify(result,null,2);});
-async function poll(){if(state.busy)return;try{if($('#detail-dialog').open&&state.run)await refreshRun();if(!$('#task-dialog').open&&!$('#profile-dialog').open)await refreshList();}catch{/* Keep drafts and visible evidence when the service is restarting. */}}
-configure().then(refreshList).catch(e=>notify('初始化失败：'+e.message));setInterval(poll,5000);
+async function poll(){if(state.busy)return;try{if($('#detail-dialog').open&&state.run)await refreshRun();if(!$('#task-dialog').open&&!$('#profile-dialog').open){if(state.view==='exports')await refreshExports();else await refreshList();}}catch{/* Keep drafts and visible evidence when the service is restarting. */}}
+configure().then(activateView).catch(e=>notify('初始化失败：'+e.message));setInterval(poll,5000);
+
+// Export candidates use the same run detail, review and final evidence checks.
+state.exportPage=1;state.exportItems=[];state.exportSelected=new Map();
+async function activateView(){
+  state.view=location.hash==='#exports'?'exports':'tasks';
+  $('#task-view').hidden=state.view!=='tasks';$('#export-view').hidden=state.view!=='exports';
+  for(const view of ['tasks','exports']){const link=$('#nav-'+view);if(view===state.view)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}
+  if(state.view==='exports')await refreshExports();else await refreshList();
+}
+window.addEventListener('hashchange',()=>{if(state.config)activateView().catch(e=>notify(e.message));});
+function updateExportSelection(){
+  if(!state.exportSelected)return;
+  const selected=state.exportSelected,eligible=state.exportItems.filter(i=>i.preflight.ready_for_local_export);
+  $('#export-selected').textContent=`已选 ${selected.size} 条`;
+  $('#export-prev').disabled=state.busy||state.exportPage<=1;$('#export-next').disabled=state.busy||state.exportPage>=(state.exportPages||1);
+  for(const id of ['export-clear','export-check','export-batch-json','export-batch-xlsx'])$('#'+id).disabled=state.busy||!selected.size;
+  document.querySelectorAll('[data-export-select]').forEach(input=>{input.checked=selected.has(input.dataset.exportSelect);input.disabled=state.busy||!state.exportItems.find(i=>i.id===input.dataset.exportSelect)?.preflight.ready_for_local_export;});
+  const page=$('#export-select-page'),count=eligible.filter(i=>selected.has(i.id)).length;
+  page.disabled=state.busy||!eligible.length;page.checked=!!eligible.length&&count===eligible.length;page.indeterminate=count>0&&count<eligible.length;
+}
+async function refreshExports(){
+  const token=state.exportToken=(state.exportToken||0)+1;
+  const query=new URLSearchParams({page:state.exportPage,query:$('#export-search').value,task_type:$('#export-type').value,readiness:$('#export-readiness').value});
+  const data=await json('/exports?'+query);if(token!==state.exportToken)return;
+  state.exportPage=data.page;state.exportPages=data.pages;state.exportItems=data.items;
+  $('#export-candidates').textContent=data.candidate_total;$('#export-ready').textContent=data.ready_count;$('#export-pending').textContent=data.pending_count;$('#export-total').textContent=data.total;
+  $('#export-page').textContent=`第 ${data.page} / ${data.pages} 页 · 共 ${data.total} 条`;
+  $('#export-prev').disabled=data.page<=1;$('#export-next').disabled=data.page>=data.pages;
+  const open=new Set([...document.querySelectorAll('#export-rows details[open]')].map(d=>d.dataset.exportIssues));
+  for(const item of data.items){if(!item.preflight.ready_for_local_export)state.exportSelected.delete(item.id);else if(state.exportSelected.has(item.id))state.exportSelected.set(item.id,item);}
+  $('#export-rows').innerHTML=data.items.length?data.items.map(item=>{
+    const ready=item.preflight.ready_for_local_export,issues=item.preflight.issues;
+    const analysis=({complete:'分析完成',pending:'待分析',stale:'需重新分析',running:'分析中',failed:'分析失败'})[item.analysis_status]||item.analysis_status;
+    return `<tr><td><input type="checkbox" data-export-select="${item.id}" aria-label="选择 ${esc(item.title)}" ${ready?'':'disabled'}></td><td><div class="task-title">${esc(item.title)}</div><div class="task-meta">${esc(item.repo_name)} · ${esc(item.domain)} / ${esc(item.subdirection)}</div><div class="tags">${tag(item.task_type)}${tag(item.difficulty)}</div></td><td><span class="hint">SessionID</span><code>${esc(item.first_session_id)||'待补齐'}</code><span class="hint">首轮 TurnID / PromptID</span><code>${esc(item.first_turn_id)||'待补齐'}</code></td><td><p>${item.has_trace?'轨迹已关联':'轨迹待补齐'} · ${item.has_recording?'录屏 '+Number(item.recording_seconds).toFixed(2)+' 秒':'录屏待补齐'}</p><p>${esc(analysis)} · ${item.review_confirmed?'已确认':'待复核'}</p><p class="hint">交付完整性：${esc(item.delivery_score??'待评价')}</p></td><td>${tag(ready?'可导出':'待补齐',ready?'':'warning')}${issues.length?`<details data-export-issues="${item.id}" ${open.has(item.id)?'open':''}><summary>${issues.length} 项待补齐</summary><ul>${issues.map(i=>`<li>${esc(i)}</li>`).join('')}</ul></details>`:''}</td><td><button data-export-open="${item.id}" data-task-id="${item.task_id}">题面与资料</button></td></tr>`;
+  }).join(''):`<tr><td colspan="6" class="empty"><strong>${data.candidate_total?'没有符合筛选条件的执行':'暂无已归档执行'}</strong>${data.candidate_total?'可以调整导出状态或搜索条件。':'任务完成并归档后会出现在这里，资料尚未补齐的记录也会保留。'}</td></tr>`;
+  updateExportSelection();
+}
+$('#export-rows').addEventListener('click',event=>{const button=event.target.closest('[data-export-open]');if(button)busy(button,()=>openTask(button.dataset.taskId,button.dataset.exportOpen));});
+$('#export-rows').addEventListener('change',event=>{
+  const input=event.target.closest('[data-export-select]');if(!input)return;
+  const item=state.exportItems.find(i=>i.id===input.dataset.exportSelect);
+  if(!state.busy&&item?.preflight.ready_for_local_export){if(input.checked){if(state.exportSelected.size>=200)notify('每批最多选择 200 条');else state.exportSelected.set(item.id,item);}else state.exportSelected.delete(item.id);}
+  updateExportSelection();
+});
+$('#export-select-page').onchange=event=>{
+  if(!state.busy)for(const item of state.exportItems.filter(i=>i.preflight.ready_for_local_export)){if(!event.target.checked)state.exportSelected.delete(item.id);else if(state.exportSelected.size<200)state.exportSelected.set(item.id,item);else{notify('每批最多选择 200 条');break;}}
+  updateExportSelection();
+};
+$('#export-clear').onclick=()=>{state.exportSelected.clear();$('#export-check-result').hidden=true;updateExportSelection();};
+$('#export-refresh').onclick=event=>busy(event.target,refreshExports);
+$('#export-prev').onclick=event=>busy(event.target,async()=>{state.exportPage--;await refreshExports();});
+$('#export-next').onclick=event=>busy(event.target,async()=>{state.exportPage++;await refreshExports();});
+for(const id of ['export-type','export-readiness'])$('#'+id).onchange=()=>{state.exportPage=1;refreshExports().catch(e=>notify(e.message));};
+$('#export-search').oninput=()=>{clearTimeout(state.exportSearchTimer);state.exportSearchTimer=setTimeout(()=>{state.exportPage=1;refreshExports().catch(e=>notify(e.message));},350);};
+$('#export-check').onclick=event=>busy(event.target,async()=>{
+  const data=await json('/exports/preflight',{run_ids:[...state.exportSelected.keys()]});
+  const result=$('#export-check-result');result.hidden=false;
+  result.innerHTML=data.ready_for_local_export?'<b>所选记录证据核验通过，可以批量导出。</b>':`<b>以下记录需补齐，已移出选择：</b><ul>${data.items.filter(i=>!i.ready_for_local_export).map(i=>{const title=state.exportSelected.get(i.run_id)?.title||i.run_id;state.exportSelected.delete(i.run_id);return `<li>${esc(title)}：${i.issues.map(esc).join('；')}</li>`;}).join('')}</ul>`;
+  await refreshExports();
+});
+for(const format of ['json','xlsx'])$('#export-batch-'+format).onclick=event=>busy(event.target,async()=>{const ids=[...state.exportSelected.keys()];await download(format,ids);notify(`已导出 ${ids.length} 条专项记录`);});

@@ -37,6 +37,8 @@ def get(request, h, path, query):
         request.send_json({**policy.schema(), 'profile':store.profile(h)})
     elif route == '/tasks':
         request.send_json(store.listing(h, query))
+    elif route == '/exports':
+        request.send_json(export.listing(h,query))
     elif route == '/environment':
         request.send_json(status(h))
     elif route=='/history' or route.startswith('/history/'):
@@ -90,6 +92,8 @@ def post(request, h, path, query=None):
         request.send_json(store.select_domain(h,payload.get('domain')))
     elif route=='/tasks':
         request.send_json(store.create(h,payload),201)
+    elif route=='/exports/preflight':
+        request.send_json(export.preflight(h,payload.get('run_ids')))
     elif route in {'/exports/json','/exports/xlsx'}:
         ids=payload.get('run_ids')
         if route.endswith('json'):
