@@ -4,7 +4,9 @@
   const PAGE_SOURCE = "claude-eval-console";
   const HELPER_SOURCE = "solo-qa-helper";
   const VERSION = chrome.runtime.getManifest().version;
-  const ALLOWED_TYPES = new Set(["SOLO_QA_SYNC", "SOLO_QA_SUBMIT"]);
+  const ALLOWED_TYPES = new Set([
+    "SOLO_QA_SYNC", "SOLO_QA_SUBMIT", "SOLO_GSB_SYNC", "SOLO_GSB_SUBMIT",
+  ]);
 
   function post(type, requestId, payload = {}) {
     window.postMessage(

@@ -1,4 +1,4 @@
-const UI_VERSION = "20260916.20";
+const UI_VERSION = "20260927.16";
 const EXPORT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const TABLE_PAGE_SIZE = 20;
 
@@ -2120,14 +2120,7 @@ async function updateMaxParallel() {
       method: "POST",
       body: JSON.stringify({ max_parallel: maxParallel }),
     });
-    if (state.health) {
-      state.health.max_parallel = result.max_parallel;
-      if (state.health.auto_refill) {
-        state.health.auto_refill.max_parallel = result.max_parallel;
-        state.health.auto_refill.detail = String(state.health.auto_refill.detail || "")
-          .replace(/并行不足\s+\d+\s+时/, `并行不足 ${result.max_parallel} 时`);
-      }
-    }
+    if (state.health) state.health.max_parallel = result.max_parallel;
     renderHealth();
     showNotice(
       `并行上限已改为 ${result.max_parallel}；正在运行的任务不会被中断`,

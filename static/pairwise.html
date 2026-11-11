@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pair-wise GSB · Eval Console</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/pairwise.css?v=29">
+</head>
+<body>
+<header><div class="topbar"><a class="brand" href="/"><i aria-hidden="true">G</i><span><strong>Eval Console</strong><small>PAIR-WISE GSB</small></span></a><nav><div class="view-tabs"><button type="button" data-view="tasks" class="active">任务列表</button><button type="button" data-view="exports">导出列表</button><button type="button" data-view="notebook">本地补题错题本</button></div><span class="header-chip" id="console-version">版本 —</span><span class="header-chip parallel-chip" id="parallel-count">Claude 0/6</span><span class="header-chip codex-chip" id="codex-count">Codex 后台 0/2</span><span class="header-chip recording-chip" id="recording-count">录屏空闲</span><span class="local-status">本地运行中</span><a href="/index.html">旧版归档</a></nav></div></header>
+<main>
+  <div id="notice" role="status" hidden></div>
+  <section id="list-view">
+    <div class="heading hero"><div><p class="eyebrow">PAIR-WISE WORKSPACE</p><h1>Pair-wise GSB</h1><p>同一起点，A/B 并行独立首轮 <span>·</span> 1M context</p></div><button id="new-pair">新建 Pair</button></div>
+    <section class="tasks-panel"><div class="task-heading"><div><p class="eyebrow">TASKS</p><h2>任务列表</h2></div><div class="toolbar"><label class="search-box"><span class="sr-only">查找题目</span><input id="search" type="search" placeholder="搜索标题或 Prompt"></label><button id="refresh" class="secondary">刷新</button></div></div>
+      <div class="table-wrap"><table class="task-table list-table"><colgroup><col class="col-number"><col class="col-project"><col class="col-sessions"><col class="col-status"><col class="col-created"><col class="col-finished"><col class="col-action"></colgroup><thead><tr><th>编号</th><th>项目 / 仓库</th><th>A / B 执行</th><th>任务状态</th><th>创建时间</th><th class="finish-heading">结束时间</th><th>操作</th></tr></thead><tbody id="pairs"></tbody></table></div>
+      <div class="toolbar pagination-bar"><div><button id="prev" class="secondary">上一页</button><button id="next" class="secondary">下一页</button></div><span id="pagination"></span></div>
+    </section>
+  </section>
+  <section id="export-view" hidden>
+    <div class="heading hero export-hero"><div><p class="eyebrow">DELIVERY QUEUE</p><h1>导出与提交</h1><p>A/B 均已归档 <span>·</span> 按结束时间倒序 <span>·</span> 跨页勾选保留</p></div><button id="export-refresh" class="secondary">刷新列表</button></div>
+    <section class="card solo-panel" id="solo-submit-panel">
+      <div><p class="eyebrow">SOLO-QA GSB</p><h2>提交到本期 GSB</h2><p id="solo-status-detail">正在检查 Chrome 提交助手…</p><p id="model-quota-status" role="status"></p><small>目标：<a href="https://solo2.jzxhnh.com/app/gsb/submit" target="_blank" rel="noopener noreferrer">solo2.jzxhnh.com/app/gsb/submit</a></small></div>
+      <div class="solo-actions"><span class="solo-bridge disconnected" id="solo-bridge-status">提交助手未连接</span><button id="solo-gsb-sync" class="secondary" type="button" disabled>同步我的 GSB</button><button id="export-selected" class="secondary" type="button">导出 Excel</button><button id="solo-gsb-submit" data-solo-submit type="button" disabled>提交所选 Pair</button></div>
+      <details class="helper-help"><summary>提交助手未连接怎么办</summary><p>在 Chrome 扩展管理页重新加载随项目提供的提交助手，然后刷新本页。扩展目录：<code id="solo-helper-path">正在读取…</code></p></details>
+    </section>
+    <aside class="export-submit-dock" id="export-submit-dock" aria-label="悬浮提交栏" hidden>
+      <div><strong>提交到 SOLO-QA</strong><span id="export-floating-selected">已选 0 对</span></div>
+      <span class="solo-bridge disconnected" id="solo-floating-status">提交助手未连接</span>
+      <button id="solo-gsb-submit-floating" data-solo-submit type="button" disabled>提交所选 Pair</button>
+    </aside>
+    <section class="tasks-panel export-panel"><div class="task-heading"><div><p class="eyebrow">READY PAIRS</p><h2>导出列表</h2></div></div>
+      <form class="list-filter-bar export-filter-bar" id="export-filters" hidden>
+        <label class="filter-search">搜索<input id="export-search" type="search" placeholder="标题、题面或项目"></label>
+        <label>编号<input id="export-number" placeholder="如 0023 或 0023-1"></label>
+        <label>任务类型<select id="export-task-type"><option value="">全部类型</option><option>0-1 代码生成</option><option>Feature 迭代</option><option>Bug 修复</option><option>代码理解</option><option>代码重构</option><option>工程化</option><option>代码测试</option></select></label>
+        <label>实际难度<select id="export-difficulty"><option value="">全部难度</option><option value="待复核">待复评</option><option>简单</option><option>中等</option><option>困难</option><option>地狱</option></select></label>
+        <label>提交条件<select id="export-readiness"><option value="">全部条件</option><option value="ready">可提交</option><option value="blocked">待检查</option></select></label>
+        <label>录屏<select id="export-recording"><option value="">全部录屏</option><option value="processing">处理中</option><option value="complete">已完成</option><option value="failed">失败</option><option value="partial">部分完成</option><option value="missing">未录屏</option></select></label>
+        <label>SOLO-QA<select id="export-solo"><option value="">全部状态</option><option value="not_submitted">未提交</option><option value="submitting">提交中</option><option value="qc_pending">质检中</option><option value="qc_passed">质检通过</option><option value="needs_fix">需要返修</option><option value="failed">提交失败</option><option value="remote_missing">远端未找到</option><option value="local_changed">本地已变化</option><option value="discarded">已废弃</option></select></label>
+        <details class="date-range-filter"><summary>结束日期 · 全部</summary><div class="date-range-menu"><div class="date-range-presets"><button type="button" data-date-preset="all">全部日期</button><button type="button" data-date-preset="today">今天</button><button type="button" data-date-preset="yesterday">昨天</button><button type="button" data-date-preset="last7">近 7 天</button></div><div class="date-range-custom"><span>指定日期</span><label>开始<input type="date" aria-label="导出结束开始日期"></label><label>结束<input type="date" aria-label="导出结束截止日期"></label><button type="button" data-date-apply>应用</button></div></div></details>
+        <button id="export-filter-reset" class="secondary filter-reset" type="reset">清空</button>
+        <span id="export-filter-status" class="filter-status" role="status" aria-live="polite"></span>
+      </form>
+      <div class="table-wrap"><table class="export-table list-table"><colgroup><col class="col-expand"><col class="col-select"><col class="col-number"><col class="col-project"><col class="col-difficulty"><col class="col-gsb"><col class="col-recording"><col class="col-readiness"><col class="col-solo"><col class="col-finished"><col class="col-action"></colgroup><thead><tr><th aria-label="展开题面和 GSB"></th><th><input id="export-select-page" type="checkbox" aria-label="选择本页"></th><th>编号</th><th>项目 / 仓库</th><th>难度</th><th>GSB</th><th>录屏</th><th>资料 / 提交前检查</th><th>SOLO-QA</th><th class="finish-heading" aria-sort="descending">结束时间 ↓</th><th>操作</th></tr></thead><tbody id="export-pairs"></tbody></table></div>
+      <div class="toolbar pagination-bar"><div><button id="export-prev" class="secondary">上一页</button><button id="export-next" class="secondary">下一页</button></div><span id="export-pagination"></span><span id="export-selected-count">已选 0 对</span></div>
+    </section>
+  </section>
+  <section id="notebook-view" hidden>
+    <div class="heading hero"><div><p class="eyebrow">LOCAL QUESTION REVIEW</p><h1>GSB 本地补题错题本</h1><p>记录出题失败与难度降级，供下一次选题参考。</p></div><a class="notebook-download" href="/api/pairwise/notebook/download" download>下载完整错题本</a></div>
+    <div class="card notebook-intro"><p>这里保存本地审核意见，与远端质检记录分开。出题时只参考少量相关的待处理记录；已处理或判定有误的记录不再参与检索。后续题通过会留下关联记录，原始审核依据仍保留。</p><small id="notebook-file"></small></div>
+    <form id="notebook-filter" class="toolbar notebook-toolbar">
+      <label>搜索题面、原因或来源<input id="notebook-search" type="search" placeholder="例如：难度、匹配、pipe-cut"></label>
+      <label>处理状态<select id="notebook-status"><option value="">全部状态</option value="open">待处理</option><option value="resolved">已处理</option><option value="dismissed">判定有误</option></select></label>
+      <label>问题类型<select id="notebook-category"><option value="">全部问题</option></select></label>
+      <button type="submit" class="secondary">查询 / 刷新</button>
+    </form>
+    <p id="notebook-counts" class="notebook-counts"></p>
+    <div id="notebook-entries"></div>
+    <div class="toolbar pagination-bar"><div><button id="notebook-prev" class="secondary">上一页</button><button id="notebook-next" class="secondary">下一页</button></div><span id="notebook-pagination"></span></div>
+  </section>
+  <section id="detail-view" hidden></section>
+</main>
+<dialog id="create-dialog">
+  <form id="create-form">
+    <div class="heading"><h2>新建 Pair</h2><button type="button" class="secondary" id="close-create">关闭</button></div>
+    <p>每题创建一个独立仓库，最终只有 main、A、B 三个分支。共同 main 准备完成后，A 与 B 在两个本地目录中同时运行，各自只进行一轮对话。</p>
+    <p id="create-notice" class="error" role="alert" hidden></p>
+    <div class="toolbar"><button id="generate-draft" type="button" class="secondary">辅助生成 0-1 题面</button><small id="draft-progress">也可直接粘贴自己的题面或现有项目需求。</small></div>
+    <div class="grid">
+      <label>题目标题<input name="title" required maxlength="120"></label>
+      <label>本题文件夹 / 新仓库名称<input name="repo_name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,99}" placeholder="unique-project-name"><small>0-1 题会以此名称建立项目，并在 main 提交空 README。</small></label>
+      <label>任务类型<select name="task_type"><option>0-1 代码生成</option><option>Feature 迭代</option><option>Bug 修复</option><option>代码理解</option><option>代码重构</option><option>工程化</option><option>代码测试</option></select></label>
+      <label>项目类别<select name="project_category" required><option value="">请选择</option><option>纯后端</option><option>纯前端</option><option>全栈</option></select></label>
+      <label>人类执行难度<select name="difficulty"><option>中等</option><option selected>困难</option><option>地狱</option></select></label>
+      <label>A 执行模型<select name="a_execution_model"><option value="auto_model/urm">auto_model/urm</option><option value="ark/urm-03">ark/urm-03</option></select></label>
+      <label>B 执行模型<select name="b_execution_model"><option value="auto_model/urm">auto_model/urm</option><option value="ark/urm-03">ark/urm-03</option></select><small>默认跟随任务列表顶部的选择；每题创建时冻结模型方案。当前异模型提交规则要求 A auto_model/urm、B ark/urm-03。</small></label>
+      <label>语言 / 框架<input name="language_framework" required placeholder="Python, FastAPI, PostgreSQL"></label>
+      <label>保存目录<input name="project_directory" list="project-directories" required></label>
+      <label class="wide">来源项目快照<input name="snapshot_url" type="url" placeholder="https://github.com/owner/repo/commit/完整40位SHA"><small>现有项目必填。系统把此快照的文件导入本题新仓库的 main；0-1 可留空。</small></label>
+      <label class="wide">User Prompt 原文<textarea name="prompt" rows="8" required placeholder="直接粘贴完整原文，保留空白和换行"></textarea></label>
+      <label class="wide">固定验收命令（可选，每行一条）<textarea name="verification_commands" rows="3" placeholder="docker compose run --rm verify"></textarea><small>归档后在干净副本执行；失败结果原样保存。</small></label>
+      <label class="wide">环境可复现等级<select name="reproducibility" required><option value="">请选择</option><option>无外部依赖</option><option>有外部依赖，未容器化</option><option>已容器化，可一键起环境</option></select><small>SOLO-QA 当前将此项作为必填。</small></label>
+    </div>
+    <details><summary>本期禁题提醒</summary><p>经典小游戏及变种、粒子物理模拟；通用 CLI、代码片段、文件/书签/密码管理；电商订单、RBAC、库存、投票、OA、博客、挂号、CRM、IM、工单、预约系统；通用报表/CSV 看板、记账、健身、菜谱、天气、番茄钟、习惯打卡、音乐播放器、旅行日记、观影记录。以项目原始规范完整清单为准。</p></details>
+    <label class="check"><input name="topic_confirmed" type="checkbox" required>我已确认题目达到困难、符合题型要求且不属于雷同禁题。</label>
+    <button type="submit">创建题目</button>
+  </form>
+</dialog>
+<dialog id="recording-dialog" aria-labelledby="recording-title">
+  <form id="recording-form">
+    <div class="heading"><h2 id="recording-title">选择录屏范围</h2><button type="button" class="secondary" id="close-recording">取消</button></div>
+    <p id="recording-pair-title"></p>
+    <fieldset class="recording-options">
+      <legend class="sr-only">录制哪一侧</legend>
+      <label><input type="radio" name="side" value="A"><span><strong>只录 A</strong><small id="recording-option-A"></small></span></label>
+      <label><input type="radio" name="side" value="B"><span><strong>只录 B</strong><small id="recording-option-B"></small></span></label>
+      <label><input type="radio" name="side" value="both" checked><span><strong>A / B 都录</strong><small>先录 A，再录 B</small></span></label>
+    </fieldset>
+    <p id="recording-choice-note" class="recording-choice-note"></p>
+    <p id="recording-notice" class="error" role="alert" hidden></p>
+    <div class="recording-dialog-actions"><button type="submit">开始录制</button></div>
+  </form>
+</dialog>
+<script src="/pairwise.js?v=52" defer></script>
+</body></html>
+.badge { display: inline-block; border-radius: 999px; padding: 5px 10px; background: var(--brand-soft); color: #3c6257; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.task-status-tag { display: inline-flex; align-items: center; gap: 6px; min-height: 27px; padding: 4px 9px; border: 1px solid transparent; border-radius: 999px; font-size: 11px; font-weight: 650; line-height: 1.5; white-space: nowrap; }
+.task-status-tag::before { content: ""; width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: currentColor; }
+.task-status-tag.busy { color: #285d95; background: #edf4fb; border-color: #d9e7f6; }
+.task-status-tag.success { color: #2f6b51; background: #e8f4ed; border-color: #d6e9de; }
+.task-status-tag.warning { color: #805a16; background: #fff6e4; border-color: #f1e2bf; }

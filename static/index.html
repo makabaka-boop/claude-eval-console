@@ -5,9 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <title>Claude Eval Console</title>
-    <link rel="stylesheet" href="/styles.css?v=39" />
+    <link rel="stylesheet" href="/styles.css?v=40" />
   </head>
   <body>
+    <aside style="padding:14px 24px;background:#fff1cf;color:#59481f">历史多轮 / 五维评分归档。新版默认禁止旧流程写入与自动续轮。<a href="/">进入 Pair-wise GSB</a></aside>
     <div class="shell">
       <header class="app-header">
         <div class="app-header-inner">
@@ -20,7 +21,7 @@
           </div>
           <div class="header-tools">
             <div class="model-chip parallel-chip version-chip" title="当前控制台版本">
-              <span></span><b id="console-version">版本 20260916.20</b>
+              <span></span><b id="console-version">版本 20260927.16</b>
             </div>
             <div class="model-chip parallel-chip"><span></span><b id="parallel-status">并行 0 / 4</b></div>
             <form class="model-switcher" id="model-form">
@@ -64,16 +65,6 @@
             <button class="new-run-button" id="new-run-button" type="button"><span>＋</span> 新建任务</button>
             <small id="directory-preview">项目文件夹编号会自动递增，难度由完成后的轨迹和产物评定。</small>
           </div>
-          <div class="auto-refill-row" id="auto-refill-row">
-            <div class="auto-refill-copy">
-              <span class="auto-refill-indicator" aria-hidden="true"></span>
-              <div>
-                <strong>自动补题</strong>
-                <small id="auto-refill-detail">按 0-1、Feature、Bug 修复的当前数量补题；第一次 Feature 优先完整模块，预检不通过才改走平滑迭代。</small>
-                <small class="auto-refill-deadline hidden" id="auto-refill-deadline"></small>
-              </div>
-            </div>
-            <div class="auto-refill-controls">
               <label class="parallel-limit-control" for="max-parallel-runs">
                 <span>并行上限</span>
                 <select id="max-parallel-runs" aria-label="并行任务上限">
@@ -85,25 +76,6 @@
                   <option value="6">6</option>
                 </select>
               </label>
-              <div class="auto-refill-timer-controls hidden" id="auto-refill-start-controls">
-                <label class="auto-refill-hours" for="auto-refill-start-hours">
-                  <input id="auto-refill-start-hours" type="number" min="0.5" max="168" step="0.5" value="2" inputmode="decimal" aria-label="自动开始小时数" />
-                  <span>小时后开始</span>
-                </label>
-                <button class="auto-refill-schedule" id="auto-refill-start-schedule" type="button">预约开始</button>
-                <button class="auto-refill-clear hidden" id="auto-refill-start-clear" type="button">取消预约</button>
-              </div>
-              <div class="auto-refill-timer-controls hidden" id="auto-refill-stop-controls">
-                <label class="auto-refill-hours" for="auto-refill-hours">
-                  <input id="auto-refill-hours" type="number" min="0.5" max="168" step="0.5" value="4" inputmode="decimal" aria-label="自动关闭小时数" />
-                  <span>小时后关闭</span>
-                </label>
-                <button class="auto-refill-schedule" id="auto-refill-schedule" type="button">开启并定时关闭</button>
-                <button class="auto-refill-clear hidden" id="auto-refill-clear" type="button">取消定时</button>
-              </div>
-              <button class="auto-refill-toggle" id="auto-refill-toggle" type="button" aria-pressed="false">自动补题：关闭</button>
-            </div>
-          </div>
         </header>
 
         <nav class="module-tabs" role="tablist" aria-label="主要模块">
@@ -494,6 +466,6 @@
         </div>
       </form>
     </dialog>
-    <script src="/app.js?v=90" defer></script>
+    <script src="/app.js?v=104" defer></script>
   </body>
 </html>

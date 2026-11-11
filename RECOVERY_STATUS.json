@@ -1,0 +1,25 @@
+{
+  "status": "partial_recovery_not_ready_for_release",
+  "recovered_on": "2026-11-11",
+  "baseline_commit": "1385f4be98d63998641c7272adb1cefad7e00363",
+  "verified_original_main_program_date": "2026-09-29",
+  "summary": "从本机历史代码记录中恢复的部分源码，包含 A/B 对比、GSB、录屏等模块。",
+  "limitations": [
+    "不同历史日期的文件经过重建，尚不能视为删除前的完整版本。",
+    "仍有历史改动和配置缺口，完整测试未通过。",
+    "旧任务数据库未恢复。"
+  ],
+  "validation": {
+    "python_syntax": {
+      "files": 56,
+      "errors": 0
+    },
+    "javascript_syntax": {
+      "static/app.js": "passed",
+      "static/pairwise.js": "passed"
+    },
+    "pairwise_api_import": "passed",
+    "test_collection": "incomplete; 920 tests collected with 11 collection errors",
+    "pairwise_tests": "3 failed before --maxfail=3 stopped execution"
+  }
+}
