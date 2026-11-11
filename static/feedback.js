@@ -17,7 +17,7 @@ function show(id){const dialog=$(id);if(!dialog.open)dialog.showModal();}
 document.addEventListener('click',event=>{const close=event.target.closest('[data-close]');if(close&&!state.busy)close.closest('dialog').close();});
 document.querySelectorAll('dialog').forEach(d=>d.addEventListener('cancel',event=>{if(state.busy)event.preventDefault();}));
 function setOptions(select,values,blank){select.innerHTML=(blank===undefined?'':option('',blank))+values.map(v=>option(v)).join('');}
-function renderProfile(){const c=state.config;$('#execution-state').textContent=c.execution_ready?'甲方 '+c.vendor_model+' · 1M':'等待甲方模型与 Key';$('#execution-notice').hidden=c.execution_ready;$('#execution-notice').textContent='执行暂未开放：'+(c.execution_blockers||[]).join('；')+'。可先准备题目、附件和检查镜像环境。';const p=c.profile;$('#profile-open').textContent=p.domain||'尚未选择 →';$('#profile-open').disabled=p.locked;$('#domain-notice').hidden=p.locked;}
+function renderProfile(){const c=state.config;$('#execution-state').textContent=c.execution_ready?'甲方 '+c.vendor_model+' · 1M':c.vendor_model?'等待甲方 Key':'等待甲方模型与 Key';$('#execution-notice').hidden=c.execution_ready;$('#execution-config-actions').hidden=c.execution_ready;$('#execution-notice').textContent='执行暂未开放：'+(c.execution_blockers||[]).join('；')+'。可先准备题目、附件和检查镜像环境。';const p=c.profile;$('#profile-open').textContent=p.domain||'尚未选择 →';$('#profile-open').disabled=p.locked;$('#domain-notice').hidden=p.locked;}
 async function configure(){state.config=await json('/config');renderProfile();setOptions($('#profile-form select'),Object.keys(state.config.domains),'请选择');setOptions($('#type-filter'),state.config.task_types,'全部任务类型');setOptions($('#export-type'),state.config.task_types,'全部任务类型');setOptions($('#task-form [name=task_type]'),state.config.task_types);setOptions($('#task-form [name=difficulty]'),state.config.difficulties);setOptions($('#task-form [name=reproducibility]'),state.config.reproducibility,'暂不填写');}
 $('#profile-open').onclick=()=>show('#profile-dialog');
 $('#profile-form').onsubmit=event=>{event.preventDefault();busy(event.submitter,async()=>{state.config.profile=await json('/profile',{domain:$('#profile-form select').value});renderProfile();$('#profile-dialog').close();notify('本期领域已固定，可开始建题');});};
@@ -103,6 +103,7 @@ async function activateView(){
   $('#task-view').hidden=state.view!=='tasks';$('#export-view').hidden=state.view!=='exports';
   for(const view of ['tasks','exports']){const link=$('#nav-'+view);if(view===state.view)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}
   if(state.view==='exports')await refreshExports();else await refreshList();
+  if(location.hash==='#vendor-config')openVendorConfig();
 }
 window.addEventListener('hashchange',()=>{if(state.config)activateView().catch(e=>notify(e.message));});
 function updateExportSelection(){
@@ -156,3 +157,18 @@ $('#export-check').onclick=event=>busy(event.target,async()=>{
   await refreshExports();
 });
 for(const format of ['json','xlsx'])$('#export-batch-'+format).onclick=event=>busy(event.target,async()=>{const ids=[...state.exportSelected.keys()];await download(format,ids);notify(`已导出 ${ids.length} 条专项记录`);});
+
+function openVendorConfig(){
+  const form=$('#vendor-form');form.reset();form.elements.model.value=state.config.vendor_model||'auto_model/urm';
+  form.elements.api_key.required=!state.config.vendor_key_configured;
+  $('#vendor-key-status').textContent=state.config.vendor_key_configured?'已配置 Key。留空保存会保留原 Key，填写新值则替换。':'尚未配置 Key。请从甲方发来的消息或发放平台复制完整密钥。';
+  show('#vendor-dialog');
+}
+$('#vendor-config').onclick=openVendorConfig;$('#vendor-config-inline').onclick=openVendorConfig;
+$('#vendor-dialog').addEventListener('close',()=>$('#vendor-form').reset());
+$('#vendor-form').onsubmit=event=>{event.preventDefault();busy(event.submitter,async()=>{
+  const form=event.target;
+  const result=await json('/vendor-config',{model:form.elements.model.value,api_key:form.elements.api_key.value});
+  form.reset();state.config={...state.config,...result};renderProfile();if(state.run)renderRun();
+  $('#vendor-dialog').close();notify(result.vendor_key_configured?'甲方配置已保存；尚未发起模型请求':'模型已保存，等待甲方 Key');
+});};

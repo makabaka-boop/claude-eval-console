@@ -16,12 +16,13 @@ def configuration(h):
     model=str(h.os.environ.get(MODEL_ENV,'')).strip()
     has_key=bool(str(h.os.environ.get(h.DOCKER_API_KEY_ENV,'')).strip())
     issues=[]
+    if getattr(h,'VENDOR_CONFIG_ERROR',''):issues.append(h.VENDOR_CONFIG_ERROR)
     if not model:issues.append('等待甲方提供并确认执行模型')
     elif model!=policy.EXECUTION_MODEL:issues.append('甲方模型与本期镜像预置模型不一致，需核对适配')
     if not has_key:issues.append('等待甲方专用 Key')
     return {'execution_ready':not issues,'execution_blockers':issues,
             'vendor_model':model,'vendor_key_configured':has_key,
-            'api_key_source':h.DOCKER_API_KEY_ENV if has_key else '未配置甲方专用 Key',
+            'api_key_source':getattr(h,'VENDOR_KEY_SOURCE',h.DOCKER_API_KEY_ENV) if has_key else '未配置甲方专用 Key',
             'docker_image':h.DOCKER_IMAGE,'expected_harness_version':HARNESS_VERSION,
             'model_config_env':MODEL_ENV,'key_config_env':h.DOCKER_API_KEY_ENV}
 

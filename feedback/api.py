@@ -1,10 +1,11 @@
 """Local-only single-session endpoints, independent of historical GSB writes."""
 import mimetypes
+import ipaddress
 import re
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import analysis, environment, export, lifecycle, media, policy, review, store, workflow
+from . import analysis, credentials, environment, export, lifecycle, media, policy, review, store, workflow
 
 PREFIX = '/api/feedback'
 ID = r'([a-f0-9]{12})'
@@ -22,6 +23,8 @@ def status(h):
 
 
 def check_write(request, h):
+    if not ipaddress.ip_address(request.client_address[0]).is_loopback:
+        raise h.WorkflowError('专项写入仅接受本机连接')
     host = request.headers.get('Host', '')
     parsed = urlparse('http://' + host)
     if parsed.hostname not in {'localhost', '127.0.0.1', '::1'}:
@@ -97,6 +100,9 @@ def post(request, h, path, query=None):
     if not isinstance(payload,dict):raise h.WorkflowError('请求须为 JSON 对象')
     if route=='/profile':
         request.send_json(store.select_domain(h,payload.get('domain')))
+    elif route=='/vendor-config':
+        with workflow.LOCK:result=credentials.save(h,payload)
+        request.send_json(result)
     elif route=='/tasks':
         request.send_json(store.create(h,payload),201)
     elif route=='/exports/preflight':

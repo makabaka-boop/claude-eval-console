@@ -12,7 +12,7 @@ python3 app.py --open
 
 使用顺序：保存原始题目和 GitHub 初始提交链接 → 开始一次独立执行 → 必要时登记中断并继续 → 自动归档完整 JSONL 和最终提交链、退出并收尾容器 → 准备干净录屏目录，实际运行并完整录屏 → 导入不超过 90 秒的视频 → 用 `gpt-6.1-sol`、`high` 分析 → 核对结果及过程反馈、播放录屏后确认 → 导出本地 Excel / JSON。保存题目不会自动调用模型。失败交付同样可录屏、评价和导出，不以低分拒绝样本。
 
-默认 Docker 镜像已更新到 `adminfather/benzhi-claude-code:20261109`，启动前核验实际 Claude Code `2.1.319`、预置 `auto_model/urm`、网关及 1M 上下文。正式执行要求服务环境显式配置 `CLAUDE_EVAL_VENDOR_MODEL`（甲方确认的模型）和 `CLAUDE_EVAL_DOCKER_API_KEY`（甲方专用 Key）；缺少任一项时允许准备题目和检查镜像，禁止创建执行。不会从个人 Claude 配置或 `ANTHROPIC_*` 凭据回退。甲方尚未发放时保持未配置，不需要填占位 Key。
+默认 Docker 镜像已更新到 `adminfather/benzhi-claude-code:20261109`，启动前核验实际 Claude Code `2.1.319`、预置 `auto_model/urm`、网关及 1M 上下文。正式执行要求配置甲方确认的模型和专用 Key。可打开顶部“模型与 Key”（或访问 `/#vendor-config`），粘贴甲方提供的完整 Key 后保存；也支持通过专用环境变量 `CLAUDE_EVAL_VENDOR_MODEL` 和 `CLAUDE_EVAL_DOCKER_API_KEY` 配置。缺少任一项时允许准备题目和检查镜像，禁止创建执行。不会从个人 Claude 配置或 `ANTHROPIC_*` 凭据回退。Key 尚未发放时保持未配置，不需要填占位 Key。网页保存仅写入本机 `.data/vendor-credentials.json`（权限 0600，Git 已忽略），不回显 Key、不写入浏览器草稿，也不调用模型；重启自动载入，已保存的本机专用配置优先。留空保存保留已有 Key，存在执行或待恢复现场时禁止更换配置。
 
 任务执行使用甲方确认的模型、Key 和 1M 上下文；分析通过独立 Codex CLI 认证显式选择指定模型与 high，不继承旧模型/medium 默认值，不静默降级。请先配置甲方 Key、Docker 镜像、GitHub 推送权限和可使用指定分析模型的 Codex 认证。当前执行器复用 macOS Terminal、screen 和 Docker；领域标签不代表已提供 Unity/GPU/固件等额外运行环境。
 

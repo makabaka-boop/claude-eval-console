@@ -16,7 +16,7 @@ from xml.etree import ElementTree as ET
 import pytest
 
 import app
-from feedback import analysis, environment, export, lifecycle, media, policy, review, store, trace, workflow
+from feedback import analysis, credentials, environment, export, lifecycle, media, policy, review, store, trace, workflow
 from pairwise import models as legacy
 REAL_FINISH=lifecycle.finish
 REAL_CLEANUP=lifecycle.cleanup
@@ -31,6 +31,8 @@ def host(tmp_path,monkeypatch):
         monkeypatch.setattr(app,key,value)
     app.initialize_database();store.initialize(app);legacy.initialize(app)
     monkeypatch.setattr(app,'WORKER_SLOT_ACTIVE',0)
+    monkeypatch.setattr(app,'VENDOR_CONFIG_ERROR','')
+    monkeypatch.setattr(app,'VENDOR_KEY_SOURCE',app.DOCKER_API_KEY_ENV)
     monkeypatch.setenv(environment.MODEL_ENV,policy.EXECUTION_MODEL)
     monkeypatch.setenv(app.DOCKER_API_KEY_ENV,'fixture-vendor-key')
     monkeypatch.setattr(lifecycle,'finish',lambda *_:None)
@@ -765,3 +767,89 @@ def test_failed_final_trace_copy_never_cleans_container(archived,monkeypatch):
     monkeypatch.setattr(lifecycle,'cleanup',lambda *_:state.update(cleanup=True))
     with pytest.raises(workflow.TraceUnavailable):workflow.archive(h,rid)
     assert store.run(h,rid)['status']=='archive_failed' and not state['cleanup']
+
+
+def test_vendor_key_private_storage_survives_reload_without_echo(host,monkeypatch):
+    key='private-fixture-vendor-key'
+    response=credentials.save(host,{'model':policy.EXECUTION_MODEL,'api_key':key})
+    target=credentials.path(host)
+    assert target.stat().st_mode&0o777==0o600
+    assert response['vendor_key_configured'] and key not in json.dumps(response)
+    monkeypatch.delenv(host.DOCKER_API_KEY_ENV);monkeypatch.delenv(environment.MODEL_ENV)
+    assert credentials.load(host)
+    assert environment.configuration(host)['execution_ready']
+    assert host.os.environ[host.DOCKER_API_KEY_ENV]==key
+    assert host.os.environ[environment.MODEL_ENV]==policy.EXECUTION_MODEL
+    assert json.loads(target.read_text())['api_key']==key
+
+
+def test_saving_vendor_key_does_not_call_models_or_docker(host,monkeypatch):
+    calls=[];monkeypatch.setattr(host,'run_command',lambda *args,**kwargs:calls.append(args))
+    credentials.save(host,{'model':policy.EXECUTION_MODEL,'api_key':'fixture-vendor-secret'})
+    assert calls==[]
+    previous=environment.credential_fingerprint(host)
+    credentials.save(host,{'model':policy.EXECUTION_MODEL,'api_key':''})
+    assert environment.credential_fingerprint(host)==previous
+
+
+def test_model_confirmation_can_be_saved_before_key(host,monkeypatch):
+    monkeypatch.delenv(host.DOCKER_API_KEY_ENV);monkeypatch.delenv(environment.MODEL_ENV)
+    response=credentials.save(host,{'model':policy.EXECUTION_MODEL,'api_key':''})
+    assert response['vendor_model']==policy.EXECUTION_MODEL and not response['execution_ready']
+    assert response['execution_blockers']==['等待甲方专用 Key']
+
+
+@pytest.mark.parametrize('payload_value',[{'model':'auto_model/urm.','api_key':'fixture'},
+    {'model':policy.EXECUTION_MODEL,'api_key':'some key\nprivate'},
+    {'model':policy.EXECUTION_MODEL,'api_key':'apikey=fixture'},
+    {'model':policy.EXECUTION_MODEL,'api_key':'xxxxx'},
+    {'model':policy.EXECUTION_MODEL,'api_key':['fixture']}])
+def test_bad_vendor_key_input_not_written_or_reflected(host,payload_value):
+    with pytest.raises(host.WorkflowError) as error:credentials.save(host,payload_value)
+    assert 'some key' not in str(error.value) and 'apikey=fixture' not in str(error.value)
+    assert not credentials.path(host).exists()
+
+
+def test_key_changes_are_blocked_for_active_sessions(host):
+    workflow.start(host,create(host)['id'])
+    with pytest.raises(host.WorkflowError,match='仍有执行'):credentials.save(host,{'model':policy.EXECUTION_MODEL,'api_key':'replacement-fixture'})
+    assert host.os.environ[host.DOCKER_API_KEY_ENV]=='fixture-vendor-key'
+    assert not credentials.path(host).exists()
+
+
+def test_private_config_with_broad_permissions_is_not_loaded(host,monkeypatch):
+    target=credentials.path(host);target.write_text(json.dumps({'model':policy.EXECUTION_MODEL,'api_key':'private-fixture-value'}));target.chmod(0o644)
+    monkeypatch.delenv(host.DOCKER_API_KEY_ENV)
+    assert not credentials.load(host) and not environment.configuration(host)['execution_ready']
+    assert 'private-fixture-value' not in host.VENDOR_CONFIG_ERROR
+    credentials.save(host,{'model':policy.EXECUTION_MODEL,'api_key':'replacement-fixture'})
+    assert environment.configuration(host)['execution_ready']
+
+
+def test_vendor_config_write_failure_does_not_expose_key(host,monkeypatch):
+    def failed(*_):raise OSError('fixture-private-secret')
+    monkeypatch.setattr(credentials.os,'replace',failed)
+    with pytest.raises(host.WorkflowError) as error:credentials.save(host,{'model':policy.EXECUTION_MODEL,'api_key':'fixture-private-secret'})
+    assert 'fixture-private-secret' not in str(error.value)
+    assert not credentials.path(host).exists()
+    assert not list(host.DATA_DIR.glob('.vendor-*'))
+
+
+def test_vendor_key_http_response_is_redacted_and_cross_site_blocked(http,host):
+    value={'model':policy.EXECUTION_MODEL,'api_key':'fixture-private-http-key'}
+    status,body=http_request(http,'/api/feedback/vendor-config',value,{'Origin':'https://untrusted.example'})
+    assert status==400 and not credentials.path(host).exists()
+    status,body=http_request(http,'/api/feedback/vendor-config',value)
+    assert status==200 and json.loads(body)['vendor_key_configured']
+    assert value['api_key'] not in body.decode()
+    status,body=http_request(http,'/api/feedback/config')
+    assert status==200 and value['api_key'] not in body.decode()
+    status,_=http_request(http,'/api/feedback/vendor-config')
+    assert status==404
+
+
+def test_vendor_config_remote_peer_cannot_spoof_localhost(host):
+    from types import SimpleNamespace
+    from feedback.api import check_write
+    request=SimpleNamespace(headers={'Host':'127.0.0.1:8765'},client_address=('10.0.0.9',12345))
+    with pytest.raises(host.WorkflowError,match='本机连接'):check_write(request,host)

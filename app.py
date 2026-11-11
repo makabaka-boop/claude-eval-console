@@ -83,6 +83,8 @@ DOCKER_IMAGE = os.environ.get(
     "adminfather/benzhi-claude-code:20261109",
 ).strip()
 DOCKER_API_KEY_ENV = "CLAUDE_EVAL_DOCKER_API_KEY"
+VENDOR_KEY_SOURCE = DOCKER_API_KEY_ENV
+VENDOR_CONFIG_ERROR = ""
 CONTAINER_TRACE_PATH = "/home/node/.claude/projects"
 PROMPT_MIN_SETTLE_SECONDS = 3.0
 PROMPT_ECHO_SETTLE_SECONDS = 2.0
@@ -148,7 +150,7 @@ SOLO_QA_PROJECT_REJECTION_MARKERS = (
     "题材不合格",
 )
 SUBMITTER_NAME = os.environ.get("CLAUDE_EVAL_SUBMITTER", "张鑫宇").strip() or "张鑫宇"
-APP_VERSION = "20261111.2"
+APP_VERSION = "20261111.3"
 FEEDBACK_MODE = os.environ.get("CLAUDE_EVAL_WORKFLOW", "feedback") == "feedback" and os.environ.get("CLAUDE_EVAL_LEGACY_MODE") != "1"
 PAIRWISE_MODE = not FEEDBACK_MODE and os.environ.get("CLAUDE_EVAL_LEGACY_MODE") != "1"
 PAIRWISE_HISTORY_PATH = APP_DIR / "gsb历史题库.md"
@@ -18320,8 +18322,9 @@ def main() -> None:
             from pairwise.models import initialize as initialize_pairs
             initialize_pairs(sys.modules[__name__])
             if FEEDBACK_MODE:
-                from feedback import store as feedback_store, workflow as feedback_workflow
+                from feedback import credentials as feedback_credentials, store as feedback_store, workflow as feedback_workflow
                 feedback_store.initialize(sys.modules[__name__])
+                feedback_credentials.load(sys.modules[__name__])
                 feedback_workflow.recover(sys.modules[__name__])
             else:
                 from pairwise.candidate_bank import initialize as initialize_candidate_bank
